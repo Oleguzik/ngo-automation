@@ -14,10 +14,14 @@ class Settings(BaseSettings):
     Attributes:
         DATABASE_URL: PostgreSQL connection string
         DEBUG: Enable debug mode (more verbose logging)
+        OPENAI_API_KEY: OpenAI API key for AI features (Phase 3)
+        OPENAI_MODEL: Model to use for cost/profit analysis
     """
     
     DATABASE_URL: str = "postgresql://ngo_user:secure_password@postgres:5432/ngo_db"
     DEBUG: bool = False
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-5.1"
     
     class Config:
         """Pydantic configuration to load from .env file"""

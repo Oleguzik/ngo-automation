@@ -13,6 +13,8 @@ env/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Database
 *.db
@@ -41,10 +43,10 @@ htmlcov/
 # Docker
 docker-compose.override.yml
 
-# Research and documentation
+# Research and internal documentation (hidden)
+docs/
 .docs/
 .github/
-docs/
 
 postgres_data/
 
@@ -55,3 +57,12 @@ postgres_data/
 # Temporary files
 *.tmp
 *.bak
+*.backup
+
+# Test data (generated files, should not be in repo)
+test_pdfs/
+generate_test_pdfs.py
+test_*.py
+documents_export.csv
+*.csv
+*.sh
