@@ -5,6 +5,7 @@ Provides CRUD operations for Organizations and Projects.
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Header, Path, Body, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
@@ -42,6 +43,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ========== Exception Handlers ==========
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """
+    Custom exception handler to return errors in standardized format.
+    Always uses 'error' key for consistency across all error responses.
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail
+        }
+    )
 
 
 # ========== Health Check ==========
@@ -383,217 +400,48 @@ def delete_project(
     return {"message": f"Project {project_id} deleted successfully"}
 
 
-# ============= EXPENSES ENDPOINTS (Phase 2 Lite) =============
+# ============= EXPENSES ENDPOINTS (DEPRECATED - Use /transactions instead) =============
+# NOTE: Expense model and endpoints have been consolidated into Transaction model (Phase 4)
+# All expense functionality is now available through /organizations/{org_id}/transactions
+# with transaction_type='expense'
 
-@app.post(
-    "/expenses",
-    response_model=schemas.ExpenseResponse,
-    status_code=201,
-    tags=["Expenses"]
-)
-async def create_expense(
-    expense: schemas.ExpenseCreate,
-    current_user_id: int = Header(..., description="Authenticated user ID"),
-    db: Session = Depends(get_db)
-) -> schemas.ExpenseResponse:
+@app.api_route("/expenses", methods=["POST", "GET"], status_code=410, tags=["Deprecated"])
+@app.api_route("/expenses/{expense_id}", methods=["GET", "PUT", "DELETE"], status_code=410, tags=["Deprecated"])
+@app.api_route("/organizations/{organization_id}/expenses", methods=["GET"], status_code=410, tags=["Deprecated"])
+async def expenses_deprecated():
     """
-    Create new expense with itemized products and audit trail.
+    DEPRECATED: Expense endpoints have been consolidated into Transactions (Phase 4).
     
-    Request body:
-        - products: List of {name, amount, quantity, unit}
-        - amount: Total amount (must equal sum of products ±0.01€)
-        - purpose: Why this expense (1-500 chars)
-        - purchase_date: Transaction date
-        - payment_method: cash, card, transfer, check, other
-        - organization_id: Parent organization ID
-        - project_id: Project ID (must belong to same org)
-        - paid_by_id: Org member who made payment (default: current_user_id)
-        - paid_to_id: Volunteer/specialist ID (optional)
-        - document_type: receipt, invoice, bank_transfer, kontoauszug, manual_entry, other
-        - shop_name: Vendor/recipient name (optional)
-        - document_link: File path/URL (optional)
-        - notes: Additional context (optional)
-    
-    Headers:
-        - current-user-id: Authenticated user ID (used for paid_by_id if not provided)
-    
-    Returns:
-        Created expense with UUID and timestamps
+    Migration Guide:
+        OLD: POST /expenses
+        NEW: POST /organizations/{org_id}/transactions
+             - Use transaction_type='expense'
+             - Rename 'products' → 'line_items'
+             - Rename 'shop_name' → 'vendor_name'
+             - Rename 'purchase_date' → 'transaction_date'
         
-    Raises:
-        404 Not Found: If organization or project doesn't exist
-        422 Unprocessable Entity: If amount doesn't match sum of items (±0.01€) or validation fails
-        400 Bad Request: If database constraint violated
-    """
-    # Set paid_by_id from authenticated user if not provided
-    if not expense.paid_by_id:
-        expense.paid_by_id = current_user_id
-    
-    db_expense = crud.create_expense(db, expense)
-    return db_expense
-
-
-@app.get(
-    "/expenses",
-    response_model=schemas.ExpenseListResponse,
-    tags=["Expenses"]
-)
-async def list_expenses(
-    skip: int = Query(0, ge=0, description="Number to skip"),
-    limit: int = Query(10, ge=1, le=100, description="Number to return"),
-    organization_id: Optional[int] = Query(None, description="Filter by organization"),
-    project_id: Optional[int] = Query(None, description="Filter by project"),
-    document_type: Optional[str] = Query(None, description="Filter by document type"),
-    paid_to_id: Optional[int] = Query(None, description="Filter by volunteer/specialist"),
-    status: Optional[str] = Query(None, description="Filter by status"),
-    db: Session = Depends(get_db)
-) -> schemas.ExpenseListResponse:
-    """
-    List expenses with optional filtering and pagination.
-    
-    Query parameters:
-        - skip: Number of records to skip (default: 0)
-        - limit: Maximum records to return (default: 10, max: 100)
-        - organization_id: Filter by organization ID (optional)
-        - project_id: Filter by project ID (optional)
-        - document_type: Filter by document type (optional)
-        - paid_to_id: Filter by volunteer/specialist ID (optional)
-        - status: Filter by status - active/archived/disputed (optional)
-    
-    Returns:
-        Paginated list of expenses matching filters
+        OLD: GET /expenses
+        NEW: GET /organizations/{org_id}/transactions?transaction_type=expense
         
-    Example:
-        GET /expenses?skip=0&limit=10&organization_id=1
-        GET /expenses?project_id=3&document_type=receipt
+        OLD: GET /expenses/{id}
+        NEW: GET /organizations/{org_id}/transactions/{id}
+    
+    For more details, see: docs/ARCHITECTURE_CONSISTENCY_ANALYSIS.md
     """
-    expenses, total = crud.get_all_expenses(
-        db,
-        skip=skip,
-        limit=limit,
-        organization_id=organization_id,
-        project_id=project_id,
-        document_type=document_type,
-        paid_to_id=paid_to_id,
-        status=status
-    )
-    
-    return schemas.ExpenseListResponse(
-        items=expenses,
-        total=total,
-        skip=skip,
-        limit=limit
-    )
-
-
-@app.get(
-    "/expenses/{expense_id}",
-    response_model=schemas.ExpenseResponse,
-    tags=["Expenses"]
-)
-async def get_expense(
-    expense_id: str = Path(..., description="Expense UUID"),
-    db: Session = Depends(get_db)
-) -> schemas.ExpenseResponse:
-    """
-    Get expense by ID.
-    
-    Path parameters:
-        - expense_id: Expense UUID
-    
-    Returns:
-        Expense object with all details and audit trail
-        
-    Raises:
-        400 Bad Request: If UUID format is invalid
-        404 Not Found: If expense doesn't exist
-    """
-    # Convert string to UUID
-    try:
-        expense_uuid = UUID(expense_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    db_expense = crud.get_expense(db, expense_uuid)
-    if not db_expense:
-        raise HTTPException(status_code=404, detail=f"Expense {expense_id} not found")
-    
-    return db_expense
-
-
-@app.put("/expenses/{expense_id}", response_model=schemas.ExpenseResponse, tags=["Expenses"])
-async def update_expense(
-    expense_id: str = Path(..., description="Expense UUID"),
-    expense_update: schemas.ExpenseUpdate = Body(...),
-    db: Session = Depends(get_db)
-) -> schemas.ExpenseResponse:
-    """Update expense (partial update, only provided fields changed)"""
-    
-    # Convert string to UUID
-    try:
-        expense_uuid = UUID(expense_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    db_expense = crud.update_expense(db, expense_uuid, expense_update)
-    if not db_expense:
-        raise HTTPException(status_code=404, detail=f"Expense {expense_id} not found")
-    
-    return db_expense
-
-
-@app.delete("/expenses/{expense_id}", status_code=204, tags=["Expenses"])
-async def delete_expense(
-    expense_id: str = Path(..., description="Expense UUID"),
-    db: Session = Depends(get_db)
-) -> None:
-    """Delete expense by ID"""
-    
-    # Convert string to UUID
-    try:
-        expense_uuid = UUID(expense_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid UUID format")
-    
-    deleted = crud.delete_expense(db, expense_uuid)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Expense {expense_id} not found")
-
-
-@app.get("/organizations/{organization_id}/expenses", response_model=schemas.ExpenseListResponse, tags=["Expenses"])
-async def get_organization_expenses(
-    organization_id: int = Path(..., gt=0),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
-    project_id: Optional[int] = Query(None),
-    document_type: Optional[str] = Query(None),
-    paid_to_id: Optional[int] = Query(None),
-    status: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
-) -> schemas.ExpenseListResponse:
-    """Get expenses for specific organization"""
-    
-    # Verify organization exists
-    org = crud.get_organization(db, organization_id)
-    if not org:
-        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
-    
-    expenses, total = crud.get_all_expenses(
-        db,
-        skip=skip,
-        limit=limit,
-        organization_id=organization_id,
-        project_id=project_id,
-        document_type=document_type,
-        paid_to_id=paid_to_id,
-        status=status
-    )
-    
-    return schemas.ExpenseListResponse(
-        items=expenses,
-        total=total,
-        skip=skip,
-        limit=limit
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "Endpoint deprecated",
+            "message": "Expense endpoints have been consolidated into Transaction endpoints (Phase 4)",
+            "migration": {
+                "create": "POST /organizations/{org_id}/transactions with transaction_type='expense'",
+                "list": "GET /organizations/{org_id}/transactions?transaction_type=expense",
+                "get": "GET /organizations/{org_id}/transactions/{tx_id}",
+                "update": "PATCH /transactions/{tx_id}",
+                "delete": "Not supported (use is_active=false for GoBD compliance)"
+            },
+            "documentation": "docs/ARCHITECTURE_CONSISTENCY_ANALYSIS.md"
+        }
     )
 
 
@@ -989,8 +837,9 @@ async def upload_pdf_with_ai_extraction(
         if not org:
             raise HTTPException(status_code=404, detail="Organization not found")
         
-        # Validate file type
-        if not file.content_type == "application/pdf":
+        # Validate file type (accept both standard PDF content types)
+        allowed_types = ["application/pdf", "application/x-pdf", "application/acrobat", "application/vnd.pdf"]
+        if file.content_type not in allowed_types and not file.filename.lower().endswith('.pdf'):
             raise HTTPException(
                 status_code=400, 
                 detail=f"Invalid file type: {file.content_type}. Only PDF files are supported."
@@ -1093,3 +942,1182 @@ async def upload_pdf_with_ai_extraction(
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post(
+    "/documents/upload",
+    response_model=schemas.DocumentProcessingResponse,
+    status_code=201,
+    tags=["Document Processing"]
+)
+async def upload_document_convenience(
+    file: UploadFile = File(...),
+    organization_id: int = Query(1, gt=0, description="Organization ID (defaults to 1 for testing)"),
+    analysis_type: str = Query("cost", regex="^(cost|profit)$"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for uploading documents (primarily for testing).
+    
+    This endpoint wraps the full document upload workflow with sensible defaults.
+    
+    **Parameters:**
+    - file: PDF file to upload (required)
+    - organization_id: Organization ID (defaults to 1 for testing)
+    - analysis_type: "cost" or "profit" (default: cost)
+    
+    **Returns:**
+    - DocumentProcessingResponse with extracted data or error status
+    """
+    # Verify organization exists
+    org = crud.get_organization(db, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+    
+    try:
+        logger.info(f"Processing PDF upload: {file.filename} ({file.content_type})")
+        
+        # Read file bytes
+        file_bytes = await file.read()
+        file_size = len(file_bytes)
+        
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        
+        logger.info(f"File size: {file_size} bytes")
+        
+        # Extract text from PDF
+        try:
+            raw_text = extract_text_from_pdf(file_bytes)
+            logger.info(f"Extracted {len(raw_text)} characters from PDF")
+        except Exception as e:
+            logger.error(f"PDF extraction failed: {str(e)}")
+            raise HTTPException(
+                status_code=422, 
+                detail=f"Failed to extract text from PDF: {str(e)}"
+            )
+        
+        if not raw_text or len(raw_text.strip()) < 10:
+            raise HTTPException(
+                status_code=422,
+                detail="PDF appears to be empty or contains no extractable text"
+            )
+        
+        # AI extraction based on analysis type
+        try:
+            if analysis_type == "cost":
+                logger.info("Extracting cost/expense data with AI")
+                extracted_data = ai_service.extract_cost_from_text(raw_text)
+            else:  # profit
+                logger.info("Extracting profit/revenue data with AI")
+                extracted_data = ai_service.extract_profit_from_text(raw_text)
+            
+            logger.info(f"AI extraction successful: {extracted_data}")
+        except Exception as e:
+            logger.error(f"AI extraction failed: {str(e)}")
+            # Still save document but mark as failed
+            doc = models.DocumentProcessing(
+                organization_id=organization_id,
+                file_name=file.filename,
+                file_type=file.content_type,
+                file_size=file_size,
+                raw_text=raw_text,
+                extracted_data=None,
+                processing_status="failed",
+                error_message=f"AI extraction error: {str(e)}"
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+            return doc
+        
+        # If extraction is empty, mark as failed with clear error
+        if not extracted_data or (isinstance(extracted_data, dict) and len(extracted_data) == 0):
+            doc = models.DocumentProcessing(
+                organization_id=organization_id,
+                file_name=file.filename,
+                file_type=file.content_type,
+                file_size=file_size,
+                raw_text=raw_text,
+                extracted_data=None,
+                processing_status="failed",
+                error_message="AI extraction returned empty result"
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+            logger.warning("AI extraction returned empty result; document marked as failed")
+            return doc
+
+        # Save to database with extracted data
+        doc = models.DocumentProcessing(
+            organization_id=organization_id,
+            file_name=file.filename,
+            file_type=file.content_type,
+            file_size=file_size,
+            raw_text=raw_text,
+            extracted_data=extracted_data,
+            processing_status="completed",
+            error_message=None
+        )
+        db.add(doc)
+        db.commit()
+        db.refresh(doc)
+        
+        logger.info(f"Document saved successfully: {doc.id}")
+        return doc
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# ========== Phase 4: Financial System Endpoints ==========
+# Transaction Management
+
+@app.post(
+    "/organizations/{org_id}/transactions",
+    response_model=schemas.TransactionResponse,
+    status_code=201,
+    tags=["Transactions"]
+)
+def create_transaction(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    transaction: schemas.TransactionCreate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Create new financial transaction (expense or revenue).
+    
+    Path Parameters:
+        org_id: Organization ID
+    
+    Request Body:
+        - transaction_type: "expense" or "revenue"
+        - transaction_date: Date of transaction
+        - amount: Transaction amount (Decimal, 2 decimals)
+        - currency: Currency code (EUR, USD, etc.)
+        - vendor_name: Vendor/customer name
+        - category: Transaction category (Lebensmittel, Büromaterial, etc.)
+        - transaction_hash: Auto-generated if not provided (SHA-256 for dedup)
+        - notes: Optional notes
+    
+    Returns:
+        Created Transaction with id, timestamps, and hash
+        
+    Raises:
+        400: Bad Request (invalid data)
+        404: Organization not found
+        409: Conflict (duplicate transaction)
+    """
+    return crud.create_transaction(db=db, transaction=transaction, organization_id=org_id)
+
+
+# ========== Convenience Endpoints (for testing without organization nesting) ==========
+
+@app.post(
+    "/transactions",
+    response_model=schemas.TransactionResponse,
+    status_code=201,
+    tags=["Transactions"]
+)
+def create_transaction_convenience(
+    transaction: schemas.TransactionCreate = Body(...),
+    organization_id: int = Query(None, gt=0, description="Organization ID (optional if provided in body, defaults to 1 if neither provided)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for creating transactions without organization nesting.
+    
+    This is primarily for testing and simple use cases.
+    
+    **Query Parameters:**
+    - organization_id: Organization ID (optional if provided in body, defaults to 1)
+    
+    **Request Body:**
+    - transaction_type: "expense" or "revenue" (optional, defaults to "expense")
+    - transaction_date: Date of transaction (ISO format, optional, defaults to today)
+    - amount: Transaction amount
+    - currency: Currency code (optional, defaults to EUR)
+    - vendor_name: Vendor/customer name (optional)
+    - category: Transaction category (optional)
+    - notes: Optional notes
+    - organization_id: Organization ID (optional if provided as query param)
+    - project_id: Project ID (optional)
+    
+    Returns:
+        Created Transaction with id, timestamps, and hash
+    """
+    # Determine organization_id from body or query parameter
+    final_org_id = transaction.organization_id or organization_id or 1
+    
+    # Verify organization exists
+    org = crud.get_organization(db, final_org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {final_org_id} not found")
+    
+    # Update transaction with resolved organization_id
+    transaction.organization_id = final_org_id
+    
+    return crud.create_transaction(db=db, transaction=transaction, organization_id=final_org_id)
+
+
+@app.get(
+    "/organizations/{org_id}/transactions",
+    response_model=List[schemas.TransactionResponse],
+    tags=["Transactions"]
+)
+def list_transactions(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    transaction_type: Optional[str] = Query(None, description="Filter: expense or revenue"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    db: Session = Depends(get_db)
+):
+    """
+    List financial transactions for organization.
+    
+    Query Parameters:
+        skip: Pagination offset
+        limit: Max records (1-100)
+        transaction_type: Optional filter (expense/revenue)
+        category: Optional category filter
+    
+    Returns:
+        List of transactions sorted by date (newest first)
+    """
+    return crud.get_transactions_by_organization(
+        db=db,
+        organization_id=org_id,
+        skip=skip,
+        limit=limit,
+        transaction_type=transaction_type,
+        category=category
+    )
+
+
+@app.get(
+    "/organizations/{org_id}/transactions/{tx_id}",
+    response_model=schemas.TransactionResponse,
+    tags=["Transactions"]
+)
+def get_transaction(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    tx_id: int = Path(..., gt=0, description="Transaction ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get specific transaction details.
+    
+    Returns:
+        Transaction object with all details
+        
+    Raises:
+        404: Transaction not found
+    """
+    tx = crud.get_transaction(db=db, transaction_id=tx_id)
+    if not tx or tx.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return tx
+
+
+@app.patch(
+    "/transactions/{tx_id}",
+    response_model=schemas.TransactionResponse,
+    tags=["Transactions"]
+)
+def update_transaction(
+    tx_id: int = Path(..., gt=0, description="Transaction ID"),
+    transaction_update: schemas.TransactionUpdate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Update transaction details (partial update).
+    
+    Request Body:
+        Only include fields to update:
+        - amount, category, notes, etc.
+    
+    Returns:
+        Updated Transaction
+        
+    Raises:
+        404: Transaction not found
+    """
+    tx = crud.update_transaction(db=db, transaction_id=tx_id, transaction_update=transaction_update)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return tx
+
+
+@app.delete(
+    "/transactions/{tx_id}",
+    response_model=schemas.TransactionResponse,
+    tags=["Transactions"]
+)
+def delete_transaction(
+    tx_id: int = Path(..., gt=0, description="Transaction ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Soft delete transaction (marks as inactive).
+    
+    GoBD Compliant: Transaction is never removed from database, only marked inactive.
+    
+    Returns:
+        Deleted Transaction (with is_active=False)
+        
+    Raises:
+        404: Transaction not found
+    """
+    tx = crud.delete_transaction(db=db, transaction_id=tx_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return tx
+
+
+@app.get(
+    "/organizations/{org_id}/transactions/project/{project_id}",
+    response_model=List[schemas.TransactionResponse],
+    tags=["Transactions"]
+)
+def get_project_transactions(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    project_id: int = Path(..., gt=0, description="Project ID"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    List transactions for specific project.
+    
+    Returns:
+        Transactions associated with project
+    """
+    return crud.get_transactions_by_project(
+        db=db,
+        project_id=project_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+# ========== Convenience Endpoints for Testing ==========
+
+@app.post(
+    "/transactions",
+    response_model=schemas.TransactionResponse,
+    status_code=201,
+    tags=["Transactions"]
+)
+def create_transaction_convenience(
+    transaction: schemas.TransactionCreate = Body(...),
+    organization_id: int = Query(1, gt=0, description="Organization ID (defaults to 1 for testing)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for creating transactions (primarily for testing).
+    
+    This endpoint wraps the full transaction creation workflow with a default organization ID.
+    
+    **Parameters:**
+    - organization_id: Organization ID (defaults to 1 for testing)
+    - transaction: Transaction data in request body
+    
+    **Returns:**
+    - TransactionResponse with created transaction data
+    """
+    org = crud.get_organization(db, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+    
+    return crud.create_transaction(db=db, transaction=transaction, organization_id=organization_id)
+
+
+@app.get(
+    "/transactions",
+    response_model=List[schemas.TransactionResponse],
+    tags=["Transactions"]
+)
+def list_transactions_convenience(
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    organization_id: int = Query(1, gt=0, description="Organization ID (defaults to 1 for testing)"),
+    transaction_type: Optional[str] = Query(None, description="Filter: expense or revenue"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for listing transactions (primarily for testing).
+    
+    This endpoint wraps the full transaction listing workflow with a default organization ID.
+    
+    **Parameters:**
+    - organization_id: Organization ID (defaults to 1 for testing)
+    - skip: Pagination offset
+    - limit: Max records (1-100)
+    - transaction_type: Optional filter (expense/revenue)
+    - category: Optional category filter
+    
+    **Returns:**
+    - List of transactions sorted by date (newest first)
+    """
+    org = crud.get_organization(db, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+    
+    return crud.get_transactions_by_organization(
+        db=db,
+        organization_id=organization_id,
+        skip=skip,
+        limit=limit,
+        transaction_type=transaction_type,
+        category=category
+    )
+
+
+@app.get(
+    "/transactions/{tx_id}",
+    response_model=schemas.TransactionResponse,
+    tags=["Transactions"]
+)
+def get_transaction_convenience(
+    tx_id: int = Path(..., gt=0, description="Transaction ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for getting a single transaction (primarily for testing).
+    
+    This endpoint allows direct access to a transaction by ID without specifying organization.
+    
+    **Parameters:**
+    - tx_id: Transaction ID
+    
+    **Returns:**
+    - Transaction object with all details
+    
+    **Raises:**
+    - 404: Transaction not found
+    """
+    tx = crud.get_transaction(db=db, transaction_id=tx_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return tx
+
+
+# Transaction Duplicate Detection & Resolution
+
+@app.post(
+    "/organizations/{org_id}/duplicates",
+    response_model=schemas.TransactionDuplicateResponse,
+    status_code=201,
+    tags=["Duplicates"]
+)
+def create_duplicate_record(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    duplicate: schemas.TransactionDuplicateCreate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Create duplicate transaction record.
+    
+    Request Body:
+        - original_transaction_id: Transaction ID
+        - duplicate_transaction_id: Potential duplicate ID
+        - similarity_score: Similarity 0.0-1.0
+    
+    Returns:
+        Duplicate record for manual review
+    """
+    return crud.create_transaction_duplicate(db=db, duplicate=duplicate)
+
+
+@app.get(
+    "/organizations/{org_id}/duplicates",
+    response_model=List[schemas.TransactionDuplicateResponse],
+    tags=["Duplicates"]
+)
+def get_unresolved_duplicates(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get unresolved duplicate transactions (dashboard queue).
+    
+    Returns:
+        List of unresolved duplicates for manual review
+    """
+    return crud.get_unresolved_duplicates(
+        db=db,
+        organization_id=org_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+@app.get(
+    "/organizations/{org_id}/duplicates/{dup_id}",
+    response_model=schemas.TransactionDuplicateResponse,
+    tags=["Duplicates"]
+)
+def get_duplicate(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    dup_id: int = Path(..., gt=0, description="Duplicate ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get specific duplicate record details.
+    
+    Returns:
+        Duplicate with original and duplicate transactions
+        
+    Raises:
+        404: Duplicate not found
+    """
+    dup = crud.get_transaction_duplicate(db=db, duplicate_id=dup_id)
+    if not dup:
+        raise HTTPException(status_code=404, detail="Duplicate record not found")
+    return dup
+
+
+@app.patch(
+    "/duplicates/{dup_id}",
+    response_model=schemas.TransactionDuplicateResponse,
+    tags=["Duplicates"]
+)
+def resolve_duplicate(
+    dup_id: int = Path(..., gt=0, description="Duplicate ID"),
+    duplicate_update: schemas.TransactionDuplicateUpdate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Resolve duplicate (mark as reviewed and set strategy).
+    
+    Request Body:
+        - resolution_strategy: "merged", "auto_ignored", "false_positive", "manual_review"
+    
+    Returns:
+        Resolved Duplicate (with resolved_at timestamp)
+        
+    Raises:
+        404: Duplicate not found
+    """
+    dup = crud.update_transaction_duplicate(
+        db=db,
+        duplicate_id=dup_id,
+        duplicate_update=duplicate_update
+    )
+    if not dup:
+        raise HTTPException(status_code=404, detail="Duplicate not found")
+    return dup
+
+
+# Fee Records & Contractor Payments
+
+@app.post(
+    "/organizations/{org_id}/fees",
+    response_model=schemas.FeeRecordResponse,
+    status_code=201,
+    tags=["Fees"]
+)
+def create_fee_record(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    fee: schemas.FeeRecordCreate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Create contractor payment record.
+    
+    Request Body:
+        - contractor_name: Contractor name
+        - contractor_id_hash: SHA-256 hash (GDPR anonymization)
+        - service_description: What service was provided
+        - gross_amount: Total amount (Decimal, 2 decimals)
+        - tax_withheld: Tax deducted (German compliance)
+        - net_amount: Amount after tax
+        - payment_date: Payment date
+        - payment_method: bank_transfer, cash, check, etc.
+        - payment_reference: Invoice number for tracking
+    
+    Returns:
+        Created Fee Record with validation
+        
+    Raises:
+        400: Invalid data (tax calculation mismatch)
+        404: Organization not found
+    """
+    return crud.create_fee_record(db=db, fee=fee, organization_id=org_id)
+
+
+@app.get(
+    "/organizations/{org_id}/fees",
+    response_model=List[schemas.FeeRecordResponse],
+    tags=["Fees"]
+)
+def list_fee_records(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    List contractor payments for organization.
+    
+    Returns:
+        Fee records sorted by payment_date (newest first)
+    """
+    return crud.get_fee_records_by_organization(
+        db=db,
+        organization_id=org_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+@app.get(
+    "/organizations/{org_id}/fees/{fee_id}",
+    response_model=schemas.FeeRecordResponse,
+    tags=["Fees"]
+)
+def get_fee_record(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    fee_id: int = Path(..., gt=0, description="Fee Record ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get specific fee record details.
+    
+    Returns:
+        Fee Record with contractor info
+        
+    Raises:
+        404: Fee not found
+    """
+    fee = crud.get_fee_record(db=db, fee_id=fee_id)
+    if not fee or fee.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Fee record not found")
+    return fee
+
+
+@app.patch(
+    "/fees/{fee_id}",
+    response_model=schemas.FeeRecordResponse,
+    tags=["Fees"]
+)
+def update_fee_record(
+    fee_id: int = Path(..., gt=0, description="Fee Record ID"),
+    fee_update: schemas.FeeRecordUpdate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Update fee record details.
+    
+    Returns:
+        Updated Fee Record
+        
+    Raises:
+        404: Fee not found
+    """
+    fee = crud.update_fee_record(db=db, fee_id=fee_id, fee_update=fee_update)
+    if not fee:
+        raise HTTPException(status_code=404, detail="Fee record not found")
+    return fee
+
+
+@app.delete(
+    "/fees/{fee_id}",
+    response_model=schemas.FeeRecordResponse,
+    tags=["Fees"]
+)
+def delete_fee_record(
+    fee_id: int = Path(..., gt=0, description="Fee Record ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Soft delete fee record.
+    
+    Returns:
+        Deleted Fee Record (with is_active=False)
+        
+    Raises:
+        404: Fee not found
+    """
+    fee = crud.delete_fee_record(db=db, fee_id=fee_id)
+    if not fee:
+        raise HTTPException(status_code=404, detail="Fee record not found")
+    return fee
+
+
+@app.get(
+    "/organizations/{org_id}/fees/summary",
+    response_model=dict,
+    tags=["Fees"]
+)
+def get_fee_summary(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get financial summary of contractor payments.
+    
+    Returns:
+        {
+            "total_gross": Decimal,
+            "total_tax_withheld": Decimal,
+            "total_net": Decimal,
+            "fee_count": int
+        }
+    
+    Use Case:
+        - Tax reporting
+        - Financial dashboards
+        - Budget reconciliation
+    """
+    return crud.get_fee_summary_by_organization(db=db, organization_id=org_id)
+
+
+# Event Costs & Impact Metrics
+
+@app.post(
+    "/organizations/{org_id}/events",
+    response_model=schemas.EventCostResponse,
+    status_code=201,
+    tags=["Events"]
+)
+def create_event_cost(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    event: schemas.EventCostCreate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Create event cost record (for impact measurement).
+    
+    Request Body:
+        - event_name: Event title
+        - event_date: Date of event
+        - total_cost: Total event budget (Decimal)
+        - attendee_count: Number of people reached
+        - location: Where event happened
+        - cost_breakdown: JSONB with breakdown (venue, catering, materials, etc.)
+        - notes: Optional notes
+    
+    Returns:
+        Event Cost with auto-calculated cost_per_person
+        
+    Raises:
+        400: Invalid data
+        404: Organization not found
+    """
+    return crud.create_event_cost(db=db, event=event, organization_id=org_id)
+
+
+@app.get(
+    "/organizations/{org_id}/events",
+    response_model=List[schemas.EventCostResponse],
+    tags=["Events"]
+)
+def list_event_costs(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    List events for organization.
+    
+    Returns:
+        Event costs sorted by date (newest first)
+    """
+    return crud.get_event_costs_by_organization(
+        db=db,
+        organization_id=org_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+@app.get(
+    "/organizations/{org_id}/events/{event_id}",
+    response_model=schemas.EventCostResponse,
+    tags=["Events"]
+)
+def get_event_cost(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    event_id: int = Path(..., gt=0, description="Event ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get specific event cost details.
+    
+    Returns:
+        Event with cost breakdown and impact metrics
+        
+    Raises:
+        404: Event not found
+    """
+    event = crud.get_event_cost(db=db, event_id=event_id)
+    if not event or event.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return event
+
+
+@app.patch(
+    "/events/{event_id}",
+    response_model=schemas.EventCostResponse,
+    tags=["Events"]
+)
+def update_event_cost(
+    event_id: int = Path(..., gt=0, description="Event ID"),
+    event_update: schemas.EventCostUpdate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Update event cost details.
+    
+    Note: If total_cost or attendee_count changes, cost_per_person is auto-recalculated.
+    
+    Returns:
+        Updated Event
+        
+    Raises:
+        404: Event not found
+    """
+    event = crud.update_event_cost(db=db, event_id=event_id, event_update=event_update)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return event
+
+
+@app.delete(
+    "/events/{event_id}",
+    response_model=schemas.EventCostResponse,
+    tags=["Events"]
+)
+def delete_event_cost(
+    event_id: int = Path(..., gt=0, description="Event ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Soft delete event cost record.
+    
+    Returns:
+        Deleted Event (with is_active=False)
+        
+    Raises:
+        404: Event not found
+    """
+    event = crud.delete_event_cost(db=db, event_id=event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return event
+
+
+@app.get(
+    "/organizations/{org_id}/events/project/{project_id}",
+    response_model=List[schemas.EventCostResponse],
+    tags=["Events"]
+)
+def get_project_events(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    project_id: int = Path(..., gt=0, description="Project ID"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    List events for specific project.
+    
+    Returns:
+        Events associated with project
+    """
+    return crud.get_event_costs_by_project(
+        db=db,
+        project_id=project_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+@app.get(
+    "/organizations/{org_id}/events/summary",
+    response_model=dict,
+    tags=["Events"]
+)
+def get_event_summary(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get financial and impact summary of events.
+    
+    Returns:
+        {
+            "total_event_cost": Decimal,
+            "total_attendees": int,
+            "event_count": int,
+            "average_cost_per_event": Decimal,
+            "average_cost_per_person": Decimal
+        }
+    
+    Use Case:
+        - Impact reporting to donors
+        - ROI analysis (cost per person reached)
+        - Event planning budget
+    """
+    return crud.get_event_cost_summary_by_organization(db=db, organization_id=org_id)
+
+
+# ========== Convenience Endpoints for FeeRecords (testing without organization nesting) ==========
+
+@app.post(
+    "/fee-records",
+    response_model=schemas.FeeRecordResponse,
+    status_code=201,
+    tags=["Fee Records"]
+)
+def create_fee_record_convenience(
+    fee: schemas.FeeRecordCreate = Body(...),
+    organization_id: int = Query(None, gt=0, description="Organization ID (optional if provided in body, defaults to 1)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for creating fee records without organization nesting.
+    
+    **Query Parameters:**
+    - organization_id: Organization ID (optional if provided in body, defaults to 1)
+    
+    **Request Body:**
+    - amount: Fee amount
+    - currency: Currency code (default: EUR)
+    - fee_type: Type of fee (e.g., "admin", "processing", "membership")
+    - description: Fee description
+    - organization_id: Organization ID (optional if provided as query param)
+    """
+    final_org_id = fee.organization_id or organization_id or 1
+    
+    org = crud.get_organization(db, final_org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {final_org_id} not found")
+    
+    fee.organization_id = final_org_id
+    return crud.create_fee_record(db=db, fee=fee, organization_id=final_org_id)
+
+
+@app.get(
+    "/fee-records",
+    response_model=List[schemas.FeeRecordResponse],
+    tags=["Fee Records"]
+)
+def list_fee_records_convenience(
+    organization_id: int = Query(1, gt=0, description="Organization ID (defaults to 1 for testing)"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for listing fee records without organization nesting.
+    
+    **Parameters:**
+    - organization_id: Organization ID (defaults to 1 for testing)
+    - skip: Pagination offset
+    - limit: Max records (1-100)
+    """
+    org = crud.get_organization(db, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+    
+    return crud.get_fee_records_by_organization(
+        db=db,
+        organization_id=organization_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+@app.get(
+    "/fee-records/{fee_id}",
+    response_model=schemas.FeeRecordResponse,
+    tags=["Fee Records"]
+)
+def get_fee_record_convenience(
+    fee_id: int = Path(..., gt=0, description="Fee Record ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for getting a single fee record (primarily for testing).
+    """
+    fee = crud.get_fee_record(db, fee_id)
+    if not fee:
+        raise HTTPException(status_code=404, detail="Fee record not found")
+    return fee
+
+
+@app.put(
+    "/fee-records/{fee_id}",
+    response_model=schemas.FeeRecordResponse,
+    tags=["Fee Records"]
+)
+def update_fee_record_convenience(
+    fee_id: int = Path(..., gt=0, description="Fee Record ID"),
+    fee_update: schemas.FeeRecordUpdate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for updating a fee record (primarily for testing).
+    """
+    updated_fee = crud.update_fee_record(db=db, fee_id=fee_id, fee_update=fee_update)
+    if not updated_fee:
+        raise HTTPException(status_code=404, detail="Fee record not found")
+    return updated_fee
+
+
+@app.delete(
+    "/fee-records/{fee_id}",
+    status_code=204,
+    tags=["Fee Records"]
+)
+def delete_fee_record_convenience(
+    fee_id: int = Path(..., gt=0, description="Fee Record ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for deleting a fee record (primarily for testing).
+    """
+    deleted = crud.delete_fee_record(db=db, fee_id=fee_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Fee record not found")
+    return None
+
+
+# ========== Convenience Endpoints for EventCosts (testing without organization nesting) ==========
+
+@app.post(
+    "/event-costs",
+    response_model=schemas.EventCostResponse,
+    status_code=201,
+    tags=["Events"]
+)
+def create_event_cost_convenience(
+    event: schemas.EventCostCreate = Body(...),
+    organization_id: int = Query(None, gt=0, description="Organization ID (optional if provided in body, defaults to 1)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for creating event costs without organization nesting.
+    
+    **Query Parameters:**
+    - organization_id: Organization ID (optional if provided in body, defaults to 1)
+    """
+    final_org_id = event.organization_id or organization_id or 1
+    
+    org = crud.get_organization(db, final_org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {final_org_id} not found")
+    
+    event.organization_id = final_org_id
+    return crud.create_event_cost(db=db, event=event, organization_id=final_org_id)
+
+
+@app.get(
+    "/event-costs",
+    response_model=List[schemas.EventCostResponse],
+    tags=["Events"]
+)
+def list_event_costs_convenience(
+    organization_id: int = Query(1, gt=0, description="Organization ID (defaults to 1 for testing)"),
+    skip: int = Query(0, ge=0, description="Skip N records"),
+    limit: int = Query(10, ge=1, le=100, description="Max records"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for listing event costs without organization nesting.
+    """
+    org = crud.get_organization(db, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+    
+    return crud.get_event_costs_by_organization(
+        db=db,
+        organization_id=organization_id,
+        skip=skip,
+        limit=limit
+    )
+
+
+@app.get(
+    "/event-costs/{event_id}",
+    response_model=schemas.EventCostResponse,
+    tags=["Events"]
+)
+def get_event_cost_convenience(
+    event_id: int = Path(..., gt=0, description="Event Cost ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for getting a single event cost (primarily for testing).
+    """
+    event = crud.get_event_cost(db, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event cost not found")
+    return event
+
+
+@app.put(
+    "/event-costs/{event_id}",
+    response_model=schemas.EventCostResponse,
+    tags=["Events"]
+)
+def update_event_cost_convenience(
+    event_id: int = Path(..., gt=0, description="Event Cost ID"),
+    event_update: schemas.EventCostUpdate = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for updating an event cost (primarily for testing).
+    """
+    updated_event = crud.update_event_cost(db=db, event_id=event_id, event_update=event_update)
+    if not updated_event:
+        raise HTTPException(status_code=404, detail="Event cost not found")
+    return updated_event
+
+
+@app.delete(
+    "/event-costs/{event_id}",
+    status_code=204,
+    tags=["Events"]
+)
+def delete_event_cost_convenience(
+    event_id: int = Path(..., gt=0, description="Event Cost ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for deleting an event cost (primarily for testing).
+    """
+    deleted = crud.delete_event_cost(db=db, event_id=event_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Event cost not found")
+    return None
+
+
+@app.get(
+    "/event-costs/summary",
+    response_model=dict,
+    tags=["Events"]
+)
+def get_event_costs_summary_convenience(
+    organization_id: int = Query(1, gt=0, description="Organization ID (defaults to 1 for testing)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convenience endpoint for getting event costs summary without organization nesting.
+    """
+    org = crud.get_organization(db, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+    
+    return crud.get_event_cost_summary_by_organization(db=db, organization_id=organization_id)

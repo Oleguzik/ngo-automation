@@ -16,6 +16,7 @@ from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Date, F
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from datetime import datetime, date
+from decimal import Decimal
 from uuid import uuid4
 import enum
 from app.database import Base
@@ -144,142 +145,6 @@ class Project(Base):
     def __repr__(self):
         """String representation for debugging"""
         return f"<Project(id={self.id}, name='{self.name}', org_id={self.organization_id})>"
-
-
-# ============================================================================
-# PHASE 2 LITE: Expense Tracking (Active MVP)
-# ============================================================================
-
-class Expense(Base):
-    """
-    Expense entity representing organizational purchases and expenditures.
-    
-    PHASE 2 Lite Scope: MVP for expense data collection with itemization & audit trail
-    - Itemized products/services with individual amounts
-    - Purpose tracking (why the expense, source context)
-    - Project linkage (which project/activity the expense belongs to)
-    - Audit trail (who made payment, who received it)
-    - Multiple document types (receipt, invoice, bank transfer, statement, etc.)
-    - Structured validation (sum of items = total ±0.01€)
-    - Foundation for analytics and reporting
-    
-    Attributes:
-        id: Unique identifier (UUID)
-        organization_id: Foreign key to Organization (required)
-        project_id: Foreign key to Project (required for Phase 2 Lite)
-        paid_by_id: User/member ID who made the payment (required, org member)
-        paid_to_id: Volunteer or specialist ID who received payment (optional)
-        products: Itemized products/services as JSON array [{name, amount, quantity, unit}]
-        amount: Total purchase amount (DECIMAL for precision)
-        purpose: Why this expense was made (required context field)
-        purchase_date: Date of purchase (YYYY-MM-DD)
-        shop_name: Name/location of seller (optional)
-        payment_method: How it was paid ('cash', 'card', 'transfer', 'check', 'other')
-        document_type: Source of expense data ('receipt', 'invoice', 'bank_transfer', 'kontoauszug', 'manual_entry', 'other')
-        document_link: URL or path to PDF/image of receipt (optional)
-        notes: Additional notes or AI-extracted details (optional)
-        status: Record status ('active', 'archived', 'disputed', etc.)
-        created_at: When expense was recorded
-        updated_at: Last modification time
-        organization: Relationship to parent Organization
-        project: Relationship to Project (what the expense was for)
-    
-    Data Validation:
-        - organization_id is required (foreign key constraint)
-        - project_id is required (links to specific project)
-        - paid_by_id is required (who authorized payment)
-        - amount must be positive decimal (0.00 to 999,999.99)
-        - amount MUST equal sum of products ±0.01€ (tolerance for rounding)
-        - purchase_date format: ISO 8601 (YYYY-MM-DD)
-        - payment_method from: 'cash', 'card', 'check', 'transfer', 'other'
-        - document_type from: 'receipt', 'invoice', 'bank_transfer', 'kontoauszug', 'manual_entry', 'other'
-        - products: JSON array of {name, amount, quantity, unit}
-        - purpose: Required string (why this expense)
-    
-    Notes:
-        - When organization deleted, all expenses are deleted (cascade)
-        - When project deleted, expenses remain but project_id becomes NULL (SET NULL)
-        - Indexed on organization_id for efficient filtering by org
-        - Indexed on project_id for efficient filtering by project
-        - Indexed on paid_to_id for filtering volunteer payments
-        - Indexed on purchase_date for date-range queries
-        - status field enables soft-delete and archiving
-        - paid_by_id and paid_to_id provide audit trail (who was involved)
-        
-    Phase 2 Lite Additions:
-        - ItemIZED products with individual amounts (not just names)
-        - Purpose field (required context/reason)
-        - Project linkage (not just organization)
-        - Audit trail (paid_by_id, paid_to_id)
-        - Multiple document types (not just links)
-        - Amount validation (items sum must match total)
-        - Volunteer payment tracking (paid_to_id)
-    
-    Example:
-        expense = Expense(
-            organization_id=1,
-            project_id=3,
-            paid_by_id=5,
-            paid_to_id=None,
-            products=[
-                {"name": "Office Supplies - Pens", "amount": 25.50, "quantity": 1, "unit": "box"},
-                {"name": "Printer Paper", "amount": 15.00, "quantity": 2, "unit": "ream"}
-            ],
-            amount=40.50,
-            purpose="Quarterly office supplies purchase for project team",
-            purchase_date=date(2026, 1, 6),
-            shop_name="Staples",
-            payment_method="card",
-            document_type="receipt",
-            document_link="https://storage.example.com/receipt123.pdf",
-            notes="Q1 office supplies"
-        )
-    """
-    
-    __tablename__ = "expenses"
-    
-    # Unique identifier (UUID for distributed systems)
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, index=True)
-    
-    # Foreign keys (relationships)
-    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
-    
-    # Audit trail (NEW) - who was involved in this transaction
-    paid_by_id = Column(Integer, nullable=False)  # Org member who made/authorized payment (REQUIRED)
-    paid_to_id = Column(Integer, nullable=True, index=True)  # Volunteer/specialist who received payment (OPTIONAL)
-    
-    # Core expense data (itemized - NEW format)
-    products = Column(JSONB, default=list, nullable=False)  # [{name, amount, quantity, unit}, ...]
-    amount = Column(DECIMAL(12, 2), nullable=False)  # Total amount (must equal sum of products ±0.01€)
-    
-    # Context and purpose (NEW) - why this expense
-    purpose = Column(String(500), nullable=False)  # WHY: reason, source, context (REQUIRED)
-    purchase_date = Column(Date, nullable=False, index=True)  # When purchase occurred
-    
-    # Vendor/recipient information
-    shop_name = Column(String(255), nullable=True)  # Store/vendor/recipient name (OPTIONAL for Phase 2 Lite)
-    payment_method = Column(Enum(PaymentMethod), default=PaymentMethod.CARD, nullable=False)  # How paid
-    
-    # Document details (NEW types)
-    document_type = Column(String(50), default="manual_entry", nullable=False)  # receipt, invoice, transfer, kontoauszug, manual_entry, other
-    document_link = Column(String(500), nullable=True)  # URL or file path to document
-    
-    # Additional metadata
-    notes = Column(Text, nullable=True)  # User notes or AI-extracted details
-    status = Column(String(50), default="active", nullable=False)  # active, archived, disputed, etc.
-    
-    # Audit timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
-    # Relationships
-    organization = relationship("Organization", foreign_keys=[organization_id], backref="expenses")
-    project = relationship("Project", foreign_keys=[project_id], backref="expenses")
-    
-    def __repr__(self):
-        """String representation for debugging"""
-        return f"<Expense(id={self.id}, org_id={self.organization_id}, project_id={self.project_id}, amount={self.amount}€, paid_by={self.paid_by_id})>"
 
 
 # ============================================================================
@@ -433,6 +298,390 @@ class DocumentProcessing(Base):
     
     def __repr__(self):
         return f"<DocumentProcessing(id={self.id}, file='{self.file_name}', status='{self.processing_status}')>"
+
+
+# ============================================================================
+# PHASE 4: Financial Reporting System with AI-Powered Transaction Extraction
+# ============================================================================
+
+class Transaction(Base):
+    """
+    Transaction entity for comprehensive financial tracking and GoBD compliance.
+    
+    PHASE 4: AI-powered multi-source transaction processing
+    - OCR extraction from receipt photos (Tesseract)
+    - AI-powered text parsing (OpenAI GPT-4o-mini)
+    - Bank statement parsing (rule-based)
+    - Invoice processing with line items
+    - Hash-based deduplication (SHA-256)
+    - GoBD-compliant audit trail
+    
+    Attributes:
+        id: Unique identifier (auto-generated)
+        organization_id: Foreign key to Organization (required)
+        project_id: Foreign key to Project (optional, for project-specific expenses)
+        transaction_hash: SHA-256 fingerprint for deduplication (unique, 16 chars)
+        transaction_type: 'expense' or 'revenue'
+        transaction_date: Date of transaction (ISO 8601 YYYY-MM-DD)
+        amount: Total transaction amount (DECIMAL for precision)
+        currency: Currency code (default: 'EUR')
+        category: GoBD-compliant category (Büromaterial, Lebensmittel, Honorare, etc.)
+        vendor_name: Payee/payer name (normalized for deduplication)
+        vat_rate: VAT/MwSt rate (0.19 for 19%, 0.07 for 7%, 0.00 for exempt)
+        vat_amount: Calculated VAT amount (auto-calculated)
+        net_amount: Amount before VAT (auto-calculated)
+        source_type: 'receipt_photo', 'bank_statement', 'invoice_pdf', 'manual_entry'
+        document_processing_id: Foreign key to DocumentProcessing (source file)
+        payment_method: 'cash', 'card', 'transfer', 'check', 'other'
+        notes: Additional notes or context
+        line_items: Itemized details as JSONB array [{description, amount, quantity}]
+        is_duplicate: Flag indicating if this is a duplicate transaction
+        duplicate_of: Self-referencing FK to original transaction (if duplicate)
+        is_active: Soft delete flag (GoBD compliance - never hard delete)
+        created_at: Creation timestamp (audit trail)
+        updated_at: Last modification timestamp (audit trail)
+        
+    AI Engineering Notes:
+        - transaction_hash enables O(1) duplicate detection
+        - Hash formula: SHA256(date|amount|normalized_vendor|currency)[:16]
+        - Vendor normalization: lowercase, remove "GmbH", "AG", "e.V.", special chars
+        - OCR → GPT-4 extraction → hash check → insert (deduplication saves ~30% API calls)
+        - line_items JSONB enables flexible itemization without schema changes
+        
+    GoBD Compliance:
+        - is_active (soft delete) - never hard delete transactions
+        - created_at, updated_at - immutable audit trail
+        - transaction_hash - ensures uniqueness and traceability
+        - All fields nullable=False where required (data integrity)
+        
+    Example:
+        transaction = Transaction(
+            organization_id=1,
+            project_id=3,
+            transaction_hash="a3f5b89c12d4e6f7",
+            transaction_type="expense",
+            transaction_date=date(2025, 1, 15),
+            amount=Decimal("43.55"),
+            currency="EUR",
+            category="Lebensmittel",
+            vendor_name="REWE",
+            vat_rate=Decimal("0.07"),
+            vat_amount=Decimal("2.85"),
+            net_amount=Decimal("40.70"),
+            source_type="receipt_photo",
+            payment_method="card",
+            line_items=[
+                {"description": "Brot", "amount": 3.50, "quantity": 2},
+                {"description": "Milch", "amount": 1.20, "quantity": 1}
+            ]
+        )
+    """
+    
+    __tablename__ = "transactions"
+    
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Foreign keys
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    document_processing_id = Column(UUID(as_uuid=True), ForeignKey("document_processing.id", ondelete="SET NULL"), nullable=True)
+    
+    # Audit trail fields (from Phase 2 Expense model)
+    paid_by_id = Column(Integer, nullable=True, index=True, comment="User/volunteer who authorized the payment")
+    paid_to_id = Column(Integer, nullable=True, index=True, comment="User/volunteer who received payment (for honoraria)")
+    
+    # Deduplication fingerprint (SHA-256 truncated to 16 chars)
+    transaction_hash = Column(String(16), unique=True, nullable=False, index=True)
+    
+    # Core transaction data
+    transaction_type = Column(String(20), nullable=False, index=True)  # 'expense' or 'revenue'
+    transaction_date = Column(Date, nullable=False, index=True)
+    amount = Column(DECIMAL(12, 2), nullable=False)
+    currency = Column(String(3), default="EUR", nullable=False)
+    
+    # German GoBD categories
+    category = Column(String(100), nullable=True, index=True)  # Büromaterial, Lebensmittel, Honorare, etc.
+    
+    # Vendor/payer information
+    vendor_name = Column(String(255), nullable=True, index=True)  # Normalized for deduplication
+    
+    # German VAT (Mehrwertsteuer) tracking
+    vat_rate = Column(DECIMAL(5, 2), nullable=True)  # 0.19, 0.07, 0.00
+    vat_amount = Column(DECIMAL(12, 2), nullable=True)
+    net_amount = Column(DECIMAL(12, 2), nullable=True)
+    
+    # Source tracking (AI pipeline metadata)
+    source_type = Column(String(50), nullable=False, index=True)  # receipt_photo, bank_statement, invoice_pdf, manual_entry
+    payment_method = Column(String(50), nullable=True)  # cash, card, transfer, check, other
+    
+    # Additional context
+    notes = Column(Text, nullable=True)
+    purpose = Column(String(500), nullable=True, comment="Purpose/context of transaction (from Phase 2 Expense model)")
+    line_items = Column(JSONB, default=list, nullable=True)  # [{description, amount, quantity, unit}, ...]
+    
+    # Deduplication tracking
+    is_duplicate = Column(Boolean, default=False, nullable=False)
+    duplicate_of = Column(Integer, ForeignKey("transactions.id"), nullable=True)  # Self-referencing FK
+    
+    # GoBD compliance (soft delete only)
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Audit timestamps (immutable)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    organization = relationship("Organization", foreign_keys=[organization_id], backref="transactions")
+    project = relationship("Project", foreign_keys=[project_id], backref="transactions")
+    document = relationship("DocumentProcessing", foreign_keys=[document_processing_id], backref="transactions")
+    
+    # Self-referencing relationship for duplicates
+    original_transaction = relationship("Transaction", remote_side=[id], foreign_keys=[duplicate_of], backref="duplicates")
+    
+    def __repr__(self):
+        return f"<Transaction(id={self.id}, hash='{self.transaction_hash}', type='{self.transaction_type}', amount={self.amount}€, vendor='{self.vendor_name}')>"
+
+
+class TransactionDuplicate(Base):
+    """
+    Track potential duplicate transactions with similarity scoring.
+    
+    PHASE 4: Duplicate detection and resolution tracking
+    - Links original transaction to potential duplicates
+    - Stores similarity score (0.0 to 1.0)
+    - Tracks resolution strategy (auto_ignored, manual_review, merged, etc.)
+    
+    Attributes:
+        id: Unique identifier
+        original_transaction_id: FK to original transaction
+        duplicate_transaction_id: FK to duplicate transaction
+        similarity_score: Similarity metric (1.0 = exact match, 0.8 = fuzzy match)
+        resolution_strategy: How duplicate was handled
+        resolved_at: When resolution was made
+        resolved_by: User/system that resolved (optional)
+        created_at: When duplicate was detected
+        
+    AI Engineering Notes:
+        - similarity_score 1.0: Exact hash match (same date, amount, vendor)
+        - similarity_score 0.8-0.99: Fuzzy match (similar but not identical)
+        - Used for manual review queue in dashboard
+        
+    Example:
+        dup = TransactionDuplicate(
+            original_transaction_id=123,
+            duplicate_transaction_id=456,
+            similarity_score=Decimal("1.0"),
+            resolution_strategy="auto_ignored"
+        )
+    """
+    
+    __tablename__ = "transaction_duplicates"
+    
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Foreign keys to transactions
+    original_transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    duplicate_transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Similarity metrics
+    similarity_score = Column(DECIMAL(3, 2), nullable=False)  # 0.00 to 1.00
+    
+    # Resolution tracking
+    resolution_strategy = Column(String(50), nullable=True)  # auto_ignored, manual_review, merged, false_positive
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(Integer, nullable=True)  # User ID who resolved (future: FK to User table)
+    
+    # Audit timestamp
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    original = relationship("Transaction", foreign_keys=[original_transaction_id])
+    duplicate = relationship("Transaction", foreign_keys=[duplicate_transaction_id])
+    
+    def __repr__(self):
+        return f"<TransactionDuplicate(original_id={self.original_transaction_id}, duplicate_id={self.duplicate_transaction_id}, score={self.similarity_score})>"
+
+
+class FeeRecord(Base):
+    """
+    Fee record for German contractor/freelancer payments (Honorare).
+    
+    PHASE 4: German tax compliance for contractor payments
+    - Tracks payments to volunteers, speakers, specialists
+    - GDPR-compliant anonymization (contractor_id_hash)
+    - Tax withholding tracking (Steuerabzug)
+    - Links to transaction for audit trail
+    
+    Attributes:
+        id: Unique identifier
+        organization_id: Foreign key to Organization
+        transaction_id: Foreign key to Transaction (payment record)
+        contractor_name: Name of contractor/volunteer (visible)
+        contractor_id_hash: SHA-256 hashed personal ID (GDPR anonymized)
+        service_description: What service was provided
+        gross_amount: Total payment before tax
+        tax_withheld: Tax deducted (if applicable)
+        net_amount: Payment after tax deduction
+        payment_date: Date of payment
+        invoice_number: Invoice/receipt reference
+        is_active: Soft delete flag
+        created_at: Creation timestamp
+        updated_at: Last modification timestamp
+        
+    GDPR Compliance:
+        - contractor_id_hash: Personal ID hashed (one-way, cannot reverse)
+        - contractor_name: Kept for business purposes (allowed under GDPR)
+        - Right to erasure: Cascade delete when organization deleted
+        
+    German Tax Law:
+        - Tracks Honorare (contractor fees) separately from regular expenses
+        - tax_withheld: Required for tax filing (Lohnsteuer, Sozialversicherung)
+        - Used for annual tax reports and contractor summaries
+        
+    Example:
+        fee = FeeRecord(
+            organization_id=1,
+            transaction_id=789,
+            contractor_name="Max Mustermann",
+            contractor_id_hash="a7f3b2c4...",  # SHA-256 of personal ID
+            service_description="Workshop facilitation - 3 hours",
+            gross_amount=Decimal("300.00"),
+            tax_withheld=Decimal("0.00"),
+            net_amount=Decimal("300.00"),
+            payment_date=date(2025, 1, 20),
+            invoice_number="HON-2025-001"
+        )
+    """
+    
+    __tablename__ = "fee_records"
+    
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Foreign keys
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True)
+    
+    # Contractor information
+    contractor_name = Column(String(255), nullable=False, index=True)
+    contractor_id_hash = Column(String(64), nullable=True)  # SHA-256 hashed personal ID (GDPR)
+    
+    # Service details
+    service_description = Column(Text, nullable=False)
+    
+    # Payment amounts
+    gross_amount = Column(DECIMAL(10, 2), nullable=False)
+    tax_withheld = Column(DECIMAL(10, 2), default=Decimal("0.00"), nullable=False)
+    net_amount = Column(DECIMAL(10, 2), nullable=False)
+    
+    # Payment metadata
+    payment_date = Column(Date, nullable=False, index=True)
+    invoice_number = Column(String(100), nullable=True)
+    
+    # Soft delete
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Audit timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    organization = relationship("Organization", foreign_keys=[organization_id], backref="fee_records")
+    transaction = relationship("Transaction", foreign_keys=[transaction_id], backref="fee_records")
+    
+    def __repr__(self):
+        return f"<FeeRecord(id={self.id}, contractor='{self.contractor_name}', amount={self.gross_amount}€, date={self.payment_date})>"
+
+
+class EventCost(Base):
+    """
+    Event cost tracking for NGO activities and workshops.
+    
+    PHASE 4: Activity-based cost tracking
+    - Links events to projects
+    - Calculates cost per attendee
+    - Detailed cost breakdown (venue, catering, materials, etc.)
+    - Useful for budget planning and impact reporting
+    
+    Attributes:
+        id: Unique identifier
+        organization_id: Foreign key to Organization
+        project_id: Foreign key to Project (which project funded the event)
+        event_name: Name of event/workshop
+        event_date: Date of event
+        total_cost: Total expenditure for event
+        attendee_count: Number of participants
+        cost_per_person: Auto-calculated (total_cost / attendee_count)
+        cost_breakdown: Itemized costs as JSONB {venue: 500, catering: 300, ...}
+        is_active: Soft delete flag
+        created_at: Creation timestamp
+        updated_at: Last modification timestamp
+        
+    Use Cases:
+        - Budget planning: "How much does a workshop cost on average?"
+        - Impact reporting: "We served 150 people at €12 per person"
+        - Donor reports: "Your donation funded 3 workshops reaching 75 youth"
+        
+    Example:
+        event = EventCost(
+            organization_id=1,
+            project_id=2,
+            event_name="Youth Workshop - Digital Skills",
+            event_date=date(2025, 1, 25),
+            total_cost=Decimal("850.00"),
+            attendee_count=25,
+            cost_per_person=Decimal("34.00"),  # Auto-calculated
+            cost_breakdown={
+                "venue": 300.00,
+                "catering": 250.00,
+                "materials": 200.00,
+                "transport": 100.00
+            }
+        )
+    """
+    
+    __tablename__ = "event_costs"
+    
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Foreign keys
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    
+    # Event details
+    event_name = Column(String(255), nullable=False)
+    event_date = Column(Date, nullable=False, index=True)
+    
+    # Cost tracking
+    total_cost = Column(DECIMAL(10, 2), nullable=False)
+    attendee_count = Column(Integer, nullable=True)  # Optional if not tracked
+    cost_per_person = Column(DECIMAL(8, 2), nullable=True)  # Auto-calculated or NULL
+    
+    # Detailed breakdown
+    cost_breakdown = Column(JSONB, default={}, nullable=True)  # {venue: 500, catering: 300, materials: 200, ...}
+    
+    # Soft delete
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Audit timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    organization = relationship("Organization", foreign_keys=[organization_id], backref="event_costs")
+    project = relationship("Project", foreign_keys=[project_id], backref="event_costs")
+    
+    def __repr__(self):
+        return f"<EventCost(id={self.id}, event='{self.event_name}', total={self.total_cost}€, attendees={self.attendee_count})>"
+
+
+# ============================================================================
+# END OF PHASE 4 MODELS
+# ============================================================================
+
 # Uncomment the following when implementing Phase 2 Full features:
 # - Document text extraction (PDF, Excel, Word, Image)
 # - OCR processing  

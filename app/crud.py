@@ -289,184 +289,9 @@ def delete_project(db: Session, project_id: int) -> bool:
     return True
 
 
-# ========== PHASE 2 LITE: Expense CRUD ==========
-
-def create_expense(db: Session, expense: schemas.ExpenseCreate) -> models.Expense:
-    """
-    Create new expense record.
-    
-    PHASE 2 Lite: MVP for expense tracking
-    - Validates organization exists
-    - Stores purchase/receipt information
-    - Returns created expense with UUID
-    
-    Args:
-        db: Database session
-        expense: Expense data from request
-        
-    Returns:
-        Created expense object with generated UUID and timestamps
-        
-    Raises:
-        HTTPException 404: If organization not found
-        HTTPException 400: If database constraint violated
-    """
-    # Verify organization exists
-    org = get_organization(db, expense.organization_id)
-    if not org:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Organization with id {expense.organization_id} not found"
-        )
-    
-    # Create expense record
-    db_expense = models.Expense(**expense.model_dump())
-    
-    try:
-        db.add(db_expense)
-        db.commit()
-        db.refresh(db_expense)
-        return db_expense
-    except IntegrityError as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Database constraint error: {str(e.orig)}"
-        )
-
-
-def get_expense(db: Session, expense_id: UUID) -> Optional[models.Expense]:
-    """
-    Get expense by UUID.
-    
-    Args:
-        db: Database session
-        expense_id: Expense UUID
-        
-    Returns:
-        Expense object or None if not found
-    """
-    return db.query(models.Expense).filter(models.Expense.id == expense_id).first()
-
-
-def get_all_expenses(
-    db: Session,
-    skip: int = 0,
-    limit: int = 10,
-    organization_id: Optional[int] = None,
-    status: Optional[str] = None
-) -> Tuple[List[models.Expense], int]:
-    """
-    Get all expenses with optional filtering.
-    
-    Args:
-        db: Database session
-        skip: Number of records to skip (pagination)
-        limit: Maximum records to return
-        organization_id: Filter by organization (optional)
-        status: Filter by status (optional)
-        
-    Returns:
-        Tuple of (expenses list, total count)
-    """
-    query = db.query(models.Expense)
-    
-    # Apply filters
-    if organization_id:
-        query = query.filter(models.Expense.organization_id == organization_id)
-    if status:
-        query = query.filter(models.Expense.status == status)
-    
-    # Get total count before pagination
-    total = query.count()
-    
-    # Apply pagination
-    expenses = query.offset(skip).limit(limit).all()
-    
-    return expenses, total
-
-
-def get_organization_expenses(
-    db: Session,
-    organization_id: int,
-    skip: int = 0,
-    limit: int = 10
-) -> Tuple[List[models.Expense], int]:
-    """
-    Get all expenses for specific organization.
-    
-    Args:
-        db: Database session
-        organization_id: Organization ID
-        skip: Pagination skip
-        limit: Pagination limit
-        
-    Returns:
-        Tuple of (expenses list, total count)
-        
-    Raises:
-        HTTPException 404: If organization not found
-    """
-    # Verify organization exists
-    org = get_organization(db, organization_id)
-    if not org:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Organization with id {organization_id} not found"
-        )
-    
-    return get_all_expenses(db, skip, limit, organization_id=organization_id)
-
-
-def update_expense(
-    db: Session,
-    expense_id: UUID,
-    expense_update: schemas.ExpenseUpdate
-) -> Optional[models.Expense]:
-    """
-    Update expense by UUID.
-    
-    Args:
-        db: Database session
-        expense_id: Expense UUID
-        expense_update: Partial update data
-        
-    Returns:
-        Updated expense object or None if not found
-    """
-    db_expense = get_expense(db, expense_id)
-    if not db_expense:
-        return None
-    
-    # Update only provided fields
-    update_data = expense_update.model_dump(exclude_unset=True)
-    
-    for field, value in update_data.items():
-        setattr(db_expense, field, value)
-    
-    db.commit()
-    db.refresh(db_expense)
-    return db_expense
-
-
-def delete_expense(db: Session, expense_id: UUID) -> bool:
-    """
-    Delete expense by UUID.
-    
-    Args:
-        db: Database session
-        expense_id: Expense UUID
-        
-    Returns:
-        True if deleted, False if not found
-    """
-    db_expense = get_expense(db, expense_id)
-    if not db_expense:
-        return False
-    
-    db.delete(db_expense)
-    db.commit()
-    return True
+# ========== PHASE 2 LITE: Expense CRUD (DEPRECATED - Use Transaction CRUD) ==========
+# NOTE: Expense CRUD functions have been removed and consolidated into Transaction CRUD
+# See create_transaction(), get_transaction(), etc. with transaction_type='expense'
 
 
 # ============================================================================
@@ -735,5 +560,698 @@ def get_cost_profit_summary(
         period_start=start_date,
         period_end=datetime.utcnow().date()
     )
+
+
+# ============================================================================
+# PHASE 4: Transaction CRUD
+# ============================================================================
+
+def create_transaction(db: Session, transaction: schemas.TransactionCreate, organization_id: int) -> models.Transaction:
+    """
+    Create new transaction in database.
+    
+    Args:
+        db: Database session
+        transaction: Transaction data from request
+        organization_id: Organization ID (set in endpoint or from request body)
+        
+    Returns:
+        Created transaction object with generated id
+        
+    Raises:
+        HTTPException 400: If transaction_hash already exists (duplicate)
+        HTTPException 400: If referenced project doesn't exist (FK violation)
+    """
+    try:
+        db_tx = models.Transaction(
+            **transaction.model_dump(exclude={'transaction_hash', 'project_id', 'organization_id'}),
+            organization_id=organization_id,
+            project_id=transaction.project_id
+        )
+        
+        # Generate transaction_hash for duplicate detection
+        # Hash formula: SHA256(date|amount|normalized_vendor|currency)[:16]
+        import hashlib
+        import re
+        
+        # Normalize vendor name for consistent hashing
+        vendor = (transaction.vendor_name or '').lower()
+        vendor = re.sub(r'\s+(gmbh|ag|e\.v\.|ltd|inc|corp)\.?\s*$', '', vendor)  # Remove company suffixes
+        vendor = re.sub(r'[^a-z0-9]', '', vendor)  # Remove special characters
+        
+        # Generate hash from key transaction attributes
+        hash_input = f"{transaction.transaction_date}|{float(transaction.amount)}|{vendor}|{transaction.currency}"
+        generated_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+        
+        # Use provided hash if available, otherwise use generated hash
+        db_tx.transaction_hash = transaction.transaction_hash or generated_hash
+        
+        db.add(db_tx)
+        db.commit()
+        db.refresh(db_tx)
+        return db_tx
+    except IntegrityError as e:
+        db.rollback()
+        if "transaction_hash" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Transaction with this hash already exists (possible duplicate)")
+        elif "organization_id" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Organization not found")
+        elif "project_id" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Project not found")
+        else:
+            raise HTTPException(status_code=400, detail="Database integrity error")
+
+
+def get_transaction(db: Session, transaction_id: int) -> Optional[models.Transaction]:
+    """
+    Get transaction by ID.
+    
+    Args:
+        db: Database session
+        transaction_id: Transaction ID
+        
+    Returns:
+        Transaction object or None if not found
+    """
+    return db.query(models.Transaction).filter(models.Transaction.id == transaction_id).first()
+
+
+def get_transactions_by_organization(
+    db: Session, 
+    organization_id: int, 
+    skip: int = 0, 
+    limit: int = 10,
+    transaction_type: Optional[str] = None,
+    category: Optional[str] = None
+) -> List[models.Transaction]:
+    """
+    Get transactions for organization with optional filtering.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        skip: Number of records to skip (pagination)
+        limit: Maximum number of records to return
+        transaction_type: Optional filter by 'expense' or 'revenue'
+        category: Optional filter by category
+        
+    Returns:
+        List of transaction objects
+    """
+    query = db.query(models.Transaction).filter(models.Transaction.organization_id == organization_id)
+    
+    if transaction_type:
+        query = query.filter(models.Transaction.transaction_type == transaction_type)
+    if category:
+        query = query.filter(models.Transaction.category == category)
+    
+    return query.order_by(models.Transaction.transaction_date.desc()).offset(skip).limit(limit).all()
+
+
+def get_transactions_by_project(
+    db: Session,
+    project_id: int,
+    skip: int = 0,
+    limit: int = 10
+) -> List[models.Transaction]:
+    """
+    Get transactions for specific project.
+    
+    Args:
+        db: Database session
+        project_id: Project ID
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of transaction objects
+    """
+    return db.query(models.Transaction).filter(
+        models.Transaction.project_id == project_id
+    ).order_by(models.Transaction.transaction_date.desc()).offset(skip).limit(limit).all()
+
+
+def update_transaction(
+    db: Session,
+    transaction_id: int,
+    transaction_update: schemas.TransactionUpdate
+) -> Optional[models.Transaction]:
+    """
+    Update transaction by ID (partial update).
+    
+    Args:
+        db: Database session
+        transaction_id: Transaction ID
+        transaction_update: Fields to update
+        
+    Returns:
+        Updated transaction object or None if not found
+    """
+    db_tx = get_transaction(db, transaction_id)
+    if not db_tx:
+        return None
+    
+    update_data = transaction_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_tx, field, value)
+    
+    db.add(db_tx)
+    db.commit()
+    db.refresh(db_tx)
+    return db_tx
+
+
+def delete_transaction(db: Session, transaction_id: int) -> Optional[models.Transaction]:
+    """
+    Soft delete transaction by setting is_active=False (GoBD compliance).
+    
+    Args:
+        db: Database session
+        transaction_id: Transaction ID
+        
+    Returns:
+        Deleted transaction object or None if not found
+    """
+    db_tx = get_transaction(db, transaction_id)
+    if not db_tx:
+        return None
+    
+    db_tx.is_active = False
+    db.add(db_tx)
+    db.commit()
+    db.refresh(db_tx)
+    return db_tx
+
+
+# ============================================================================
+# PHASE 4: Transaction Duplicate CRUD
+# ============================================================================
+
+def create_transaction_duplicate(
+    db: Session,
+    duplicate: schemas.TransactionDuplicateCreate
+) -> models.TransactionDuplicate:
+    """
+    Create transaction duplicate detection record.
+    
+    Args:
+        db: Database session
+        duplicate: Duplicate data from request
+        
+    Returns:
+        Created duplicate record
+        
+    Raises:
+        HTTPException 400: If transaction IDs don't exist
+    """
+    try:
+        db_dup = models.TransactionDuplicate(**duplicate.model_dump())
+        db.add(db_dup)
+        db.commit()
+        db.refresh(db_dup)
+        return db_dup
+    except IntegrityError as e:
+        db.rollback()
+        if "transaction" in str(e.orig):
+            raise HTTPException(status_code=400, detail="One or both transaction IDs not found")
+        else:
+            raise HTTPException(status_code=400, detail="Database integrity error")
+
+
+def get_transaction_duplicate(db: Session, duplicate_id: int) -> Optional[models.TransactionDuplicate]:
+    """
+    Get transaction duplicate record by ID.
+    
+    Args:
+        db: Database session
+        duplicate_id: Duplicate record ID
+        
+    Returns:
+        Duplicate record or None if not found
+    """
+    return db.query(models.TransactionDuplicate).filter(models.TransactionDuplicate.id == duplicate_id).first()
+
+
+def get_duplicates_for_transaction(
+    db: Session,
+    transaction_id: int,
+    skip: int = 0,
+    limit: int = 10
+) -> List[models.TransactionDuplicate]:
+    """
+    Get all duplicate records for a transaction.
+    
+    Args:
+        db: Database session
+        transaction_id: Transaction ID
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of duplicate records
+    """
+    return db.query(models.TransactionDuplicate).filter(
+        (models.TransactionDuplicate.original_transaction_id == transaction_id) |
+        (models.TransactionDuplicate.duplicate_transaction_id == transaction_id)
+    ).offset(skip).limit(limit).all()
+
+
+def update_transaction_duplicate(
+    db: Session,
+    duplicate_id: int,
+    duplicate_update: schemas.TransactionDuplicateUpdate
+) -> Optional[models.TransactionDuplicate]:
+    """
+    Update duplicate record (resolve duplicate).
+    
+    Args:
+        db: Database session
+        duplicate_id: Duplicate record ID
+        duplicate_update: Resolution data
+        
+    Returns:
+        Updated duplicate record or None if not found
+    """
+    db_dup = get_transaction_duplicate(db, duplicate_id)
+    if not db_dup:
+        return None
+    
+    update_data = duplicate_update.model_dump(exclude_unset=True)
+    
+    # If resolution_strategy is provided, set resolved_at
+    if 'resolution_strategy' in update_data and update_data['resolution_strategy']:
+        update_data['resolved_at'] = datetime.utcnow()
+    
+    for field, value in update_data.items():
+        setattr(db_dup, field, value)
+    
+    db.add(db_dup)
+    db.commit()
+    db.refresh(db_dup)
+    return db_dup
+
+
+def get_unresolved_duplicates(
+    db: Session,
+    organization_id: int,
+    skip: int = 0,
+    limit: int = 10
+) -> List[models.TransactionDuplicate]:
+    """
+    Get unresolved duplicate records for organization.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of unresolved duplicates
+    """
+    return db.query(models.TransactionDuplicate).join(
+        models.Transaction,
+        models.TransactionDuplicate.original_transaction_id == models.Transaction.id
+    ).filter(
+        models.Transaction.organization_id == organization_id,
+        models.TransactionDuplicate.resolved_at == None
+    ).offset(skip).limit(limit).all()
+
+
+# ============================================================================
+# PHASE 4: Fee Record CRUD
+# ============================================================================
+
+def create_fee_record(db: Session, fee: schemas.FeeRecordCreate, organization_id: int) -> models.FeeRecord:
+    """
+    Create fee record for contractor payment.
+    
+    Args:
+        db: Database session
+        fee: Fee record data from request
+        organization_id: Organization ID
+        
+    Returns:
+        Created fee record
+        
+    Raises:
+        HTTPException 400: If transaction_id invalid (FK constraint)
+    """
+    try:
+        db_fee = models.FeeRecord(
+            **fee.model_dump(exclude={'transaction_id', 'organization_id'}),
+            organization_id=organization_id,
+            transaction_id=fee.transaction_id
+        )
+        db.add(db_fee)
+        db.commit()
+        db.refresh(db_fee)
+        return db_fee
+    except IntegrityError as e:
+        db.rollback()
+        if "transaction_id" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Transaction not found")
+        elif "organization_id" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Organization not found")
+        else:
+            raise HTTPException(status_code=400, detail="Database integrity error")
+
+
+def get_fee_record(db: Session, fee_id: int) -> Optional[models.FeeRecord]:
+    """
+    Get fee record by ID.
+    
+    Args:
+        db: Database session
+        fee_id: Fee record ID
+        
+    Returns:
+        Fee record or None if not found
+    """
+    return db.query(models.FeeRecord).filter(models.FeeRecord.id == fee_id).first()
+
+
+def get_fee_records_by_organization(
+    db: Session,
+    organization_id: int,
+    skip: int = 0,
+    limit: int = 10
+) -> List[models.FeeRecord]:
+    """
+    Get fee records for organization.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of fee records
+    """
+    return db.query(models.FeeRecord).filter(
+        models.FeeRecord.organization_id == organization_id
+    ).order_by(models.FeeRecord.payment_date.desc()).offset(skip).limit(limit).all()
+
+
+def update_fee_record(
+    db: Session,
+    fee_id: int,
+    fee_update: schemas.FeeRecordUpdate
+) -> Optional[models.FeeRecord]:
+    """
+    Update fee record (partial update).
+    
+    Args:
+        db: Database session
+        fee_id: Fee record ID
+        fee_update: Fields to update
+        
+    Returns:
+        Updated fee record or None if not found
+    """
+    db_fee = get_fee_record(db, fee_id)
+    if not db_fee:
+        return None
+    
+    update_data = fee_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_fee, field, value)
+    
+    db.add(db_fee)
+    db.commit()
+    db.refresh(db_fee)
+    return db_fee
+
+
+def delete_fee_record(db: Session, fee_id: int) -> Optional[models.FeeRecord]:
+    """
+    Soft delete fee record.
+    
+    Args:
+        db: Database session
+        fee_id: Fee record ID
+        
+    Returns:
+        Deleted fee record or None if not found
+    """
+    db_fee = get_fee_record(db, fee_id)
+    if not db_fee:
+        return None
+    
+    db_fee.is_active = False
+    db.add(db_fee)
+    db.commit()
+    db.refresh(db_fee)
+    return db_fee
+
+
+def get_fee_summary_by_organization(db: Session, organization_id: int) -> dict:
+    """
+    Get fee summary for organization (total paid, tax withheld, count).
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        
+    Returns:
+        Dictionary with summary stats
+    """
+    from decimal import Decimal
+    
+    fees = db.query(models.FeeRecord).filter(
+        models.FeeRecord.organization_id == organization_id,
+        models.FeeRecord.is_active == True
+    ).all()
+    
+    if not fees:
+        return {
+            "total_gross": Decimal("0"),
+            "total_tax_withheld": Decimal("0"),
+            "total_net": Decimal("0"),
+            "fee_count": 0
+        }
+    
+    return {
+        "total_gross": sum(f.gross_amount for f in fees),
+        "total_tax_withheld": sum(f.tax_withheld for f in fees),
+        "total_net": sum(f.net_amount for f in fees),
+        "fee_count": len(fees)
+    }
+
+
+# ============================================================================
+# PHASE 4: Event Cost CRUD
+# ============================================================================
+
+def create_event_cost(db: Session, event: schemas.EventCostCreate, organization_id: int) -> models.EventCost:
+    """
+    Create event cost record.
+    
+    Args:
+        db: Database session
+        event: Event cost data from request
+        organization_id: Organization ID
+        
+    Returns:
+        Created event cost record
+        
+    Raises:
+        HTTPException 400: If project_id invalid (FK constraint)
+    """
+    try:
+        # Auto-calculate cost_per_person if not provided
+        cost_per_person = event.cost_per_person
+        if not cost_per_person and event.attendee_count:
+            from decimal import Decimal
+            cost_per_person = event.total_cost / Decimal(str(event.attendee_count))
+        
+        # Convert cost_breakdown Decimals to floats for JSON serialization
+        cost_breakdown_dict = None
+        if event.cost_breakdown:
+            cost_breakdown_dict = {}
+            for key, value in event.cost_breakdown.model_dump().items():
+                if value is not None:
+                    cost_breakdown_dict[key] = float(value)
+        
+        db_event = models.EventCost(
+            **event.model_dump(exclude={'project_id', 'cost_per_person', 'organization_id', 'cost_breakdown'}),
+            organization_id=organization_id,
+            project_id=event.project_id,
+            cost_per_person=cost_per_person,
+            cost_breakdown=cost_breakdown_dict
+        )
+        db.add(db_event)
+        db.commit()
+        db.refresh(db_event)
+        return db_event
+    except IntegrityError as e:
+        db.rollback()
+        if "project_id" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Project not found")
+        elif "organization_id" in str(e.orig):
+            raise HTTPException(status_code=400, detail="Organization not found")
+        else:
+            raise HTTPException(status_code=400, detail="Database integrity error")
+
+
+def get_event_cost(db: Session, event_id: int) -> Optional[models.EventCost]:
+    """
+    Get event cost record by ID.
+    
+    Args:
+        db: Database session
+        event_id: Event cost ID
+        
+    Returns:
+        Event cost record or None if not found
+    """
+    return db.query(models.EventCost).filter(models.EventCost.id == event_id).first()
+
+
+def get_event_costs_by_organization(
+    db: Session,
+    organization_id: int,
+    skip: int = 0,
+    limit: int = 10
+) -> List[models.EventCost]:
+    """
+    Get event costs for organization.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of event cost records
+    """
+    return db.query(models.EventCost).filter(
+        models.EventCost.organization_id == organization_id
+    ).order_by(models.EventCost.event_date.desc()).offset(skip).limit(limit).all()
+
+
+def get_event_costs_by_project(
+    db: Session,
+    project_id: int,
+    skip: int = 0,
+    limit: int = 10
+) -> List[models.EventCost]:
+    """
+    Get event costs for specific project.
+    
+    Args:
+        db: Database session
+        project_id: Project ID
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of event cost records
+    """
+    return db.query(models.EventCost).filter(
+        models.EventCost.project_id == project_id
+    ).order_by(models.EventCost.event_date.desc()).offset(skip).limit(limit).all()
+
+
+def update_event_cost(
+    db: Session,
+    event_id: int,
+    event_update: schemas.EventCostUpdate
+) -> Optional[models.EventCost]:
+    """
+    Update event cost record (partial update).
+    
+    Args:
+        db: Database session
+        event_id: Event cost ID
+        event_update: Fields to update
+        
+    Returns:
+        Updated event cost record or None if not found
+    """
+    db_event = get_event_cost(db, event_id)
+    if not db_event:
+        return None
+    
+    update_data = event_update.model_dump(exclude_unset=True)
+    
+    # Recalculate cost_per_person if total_cost or attendee_count changed
+    if 'total_cost' in update_data or 'attendee_count' in update_data:
+        total = update_data.get('total_cost', db_event.total_cost)
+        count = update_data.get('attendee_count', db_event.attendee_count)
+        if count:
+            from decimal import Decimal
+            update_data['cost_per_person'] = total / Decimal(str(count))
+    
+    for field, value in update_data.items():
+        setattr(db_event, field, value)
+    
+    db.add(db_event)
+    db.commit()
+    db.refresh(db_event)
+    return db_event
+
+
+def delete_event_cost(db: Session, event_id: int) -> Optional[models.EventCost]:
+    """
+    Soft delete event cost record.
+    
+    Args:
+        db: Database session
+        event_id: Event cost ID
+        
+    Returns:
+        Deleted event cost record or None if not found
+    """
+    db_event = get_event_cost(db, event_id)
+    if not db_event:
+        return None
+    
+    db_event.is_active = False
+    db.add(db_event)
+    db.commit()
+    db.refresh(db_event)
+    return db_event
+
+
+def get_event_cost_summary_by_organization(db: Session, organization_id: int) -> dict:
+    """
+    Get event cost summary for organization.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        
+    Returns:
+        Dictionary with summary stats
+    """
+    from decimal import Decimal
+    
+    events = db.query(models.EventCost).filter(
+        models.EventCost.organization_id == organization_id,
+        models.EventCost.is_active == True
+    ).all()
+    
+    if not events:
+        return {
+            "total_event_cost": Decimal("0"),
+            "total_attendees": 0,
+            "event_count": 0,
+            "average_cost_per_event": Decimal("0"),
+            "average_cost_per_person": Decimal("0")
+        }
+    
+    total_cost = sum(e.total_cost for e in events)
+    total_attendees = sum(e.attendee_count or 0 for e in events)
+    
+    return {
+        "total_event_cost": total_cost,
+        "total_attendees": total_attendees,
+        "event_count": len(events),
+        "average_cost_per_event": total_cost / len(events),
+        "average_cost_per_person": total_cost / total_attendees if total_attendees > 0 else Decimal("0")
+    }
 
 

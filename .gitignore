@@ -43,12 +43,13 @@ htmlcov/
 # Docker
 docker-compose.override.yml
 
-# Research and internal documentation (hidden)
+# Research and internal documentation 
 docs/
 .docs/
 .github/
 
 postgres_data/
+scripts/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -58,8 +59,12 @@ postgres_data/
 *.tmp
 *.bak
 *.backup
+COMMIT_*.txt
 
 # Test data (generated files, should not be in repo)
+.pytest_cache/
+test_docs/
+test_results/
 test_pdfs/
 generate_test_pdfs.py
 test_*.py

@@ -9,7 +9,7 @@ PHASE 2 Full: Document, Beneficiary, Case schemas (⏸️ Deferred - commented o
 
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field, validator, field_validator
+from pydantic import BaseModel, EmailStr, Field, validator, field_validator, ConfigDict
 from datetime import datetime, date
 from typing import Optional, List, Literal
 from decimal import Decimal
@@ -231,117 +231,11 @@ class ProductLineItem(BaseModel):
         }
 
 
-class ExpenseBase(BaseModel):
-    """Base expense fields"""
-    # Items & amount
-    products: List[ProductLineItem] = Field(..., min_items=1, description="Itemized products/services")
-    amount: Decimal = Field(..., gt=0, description="Total amount")
-    
-    # Context & purpose
-    purpose: str = Field(..., min_length=1, max_length=500, description="Why this expense")
-    purchase_date: date = Field(..., description="Transaction date")
-    
-    # Vendor/recipient
-    shop_name: Optional[str] = Field(default=None, max_length=255, description="Vendor/recipient name")
-    
-    # Payment method & document
-    payment_method: PaymentMethodEnum = Field(..., description="How paid")
-    document_type: DocumentTypeEnum = Field(default=DocumentTypeEnum.MANUAL_ENTRY, description="Document source")
-    document_link: Optional[str] = Field(default=None, max_length=500, description="File path/URL")
-    
-    # Notes
-    notes: Optional[str] = Field(default=None, max_length=1000, description="Additional context")
-    
-    @field_validator('amount')
-    @classmethod
-    def validate_amount_matches_items(cls, v, info):
-        """Validate total matches sum of line items (±0.01€ tolerance)"""
-        if 'products' in info.data:
-            products = info.data['products']
-            if isinstance(products, list) and len(products) > 0:
-                # Handle both ProductLineItem objects and dicts
-                line_total = Decimal('0')
-                for p in products:
-                    if isinstance(p, dict):
-                        line_total += Decimal(str(p.get('amount', 0)))
-                    else:
-                        line_total += p.amount
-                
-                tolerance = Decimal('0.01')
-                if abs(v - line_total) > tolerance:
-                    raise ValueError(
-                        f'Total amount {v}€ does not match sum of items {line_total}€ '
-                        f'(tolerance: ±0.01€)'
-                    )
-        return v
-
-
-class ExpenseCreate(ExpenseBase):
-    """Schema for creating new expense"""
-    organization_id: int = Field(..., gt=0, description="Organization ID")
-    project_id: int = Field(..., gt=0, description="Project ID")
-    paid_by_id: Optional[int] = Field(default=None, gt=0, description="Org member who made payment (default: auth user)")
-    paid_to_id: Optional[int] = Field(default=None, gt=0, description="Volunteer/specialist ID")
-
-
-class ExpenseUpdate(BaseModel):
-    """Schema for updating expense (all fields optional)"""
-    products: Optional[List[ProductLineItem]] = None
-    amount: Optional[Decimal] = Field(default=None, gt=0)
-    purpose: Optional[str] = Field(default=None, min_length=1, max_length=500)
-    purchase_date: Optional[date] = None
-    project_id: Optional[int] = Field(default=None, gt=0)
-    shop_name: Optional[str] = Field(default=None, max_length=255)
-    payment_method: Optional[PaymentMethodEnum] = None
-    document_type: Optional[DocumentTypeEnum] = None
-    document_link: Optional[str] = Field(default=None, max_length=500)
-    paid_to_id: Optional[int] = Field(default=None, gt=0)
-    notes: Optional[str] = Field(default=None, max_length=1000)
-    status: Optional[str] = Field(default=None, pattern="^(active|archived|disputed)$")
-
-
-class ExpenseResponse(ExpenseBase):
-    """Response with system-generated fields"""
-    id: UUID = Field(..., description="Expense UUID")
-    organization_id: int
-    project_id: int
-    paid_by_id: int
-    paid_to_id: Optional[int]
-    status: str
-    created_at: datetime
-    updated_at: datetime
-    
-    class Config:
-        from_attributes = True
-
-
-class ExpenseListResponse(BaseModel):
-    """
-    Schema for paginated expense list response.
-    
-    Example:
-        {
-            "items": [
-                {
-                    "id": "uuid-1",
-                    "organization_id": 1,
-                    ...
-                },
-                {
-                    "id": "uuid-2",
-                    "organization_id": 1,
-                    ...
-                }
-            ],
-            "total": 42,
-            "skip": 0,
-            "limit": 10
-        }
-    """
-    items: List[ExpenseResponse] = []
-    total: int = Field(..., description="Total number of expenses (across all pages)")
-    skip: int = Field(default=0, description="Number of records skipped")
-    limit: int = Field(default=10, description="Number of records returned")
+# ============================================================================
+# PHASE 2 LITE: Expense Schemas (DEPRECATED - Use Transaction schemas)
+# ============================================================================
+# NOTE: Expense schemas have been removed and consolidated into Transaction schemas
+# See TransactionCreate, TransactionResponse, etc. with transaction_type='expense'
 
 
 # ============================================================================
@@ -404,7 +298,7 @@ class DonorInfo(BaseModel):
 class ProfitRecordBase(BaseModel):
     """Base schema for profit records"""
     source: str = Field(..., max_length=100, description="Revenue source (donation, grant, sales, etc.)")
-    amount: Decimal = Field(..., gt=0, decimal_places=2, description="Revenue amount")
+    amount: Decimal = Field(..., gt=0, description="Revenue amount")
     currency: str = Field(default="EUR", max_length=3, description="Currency code")
     received_date: date = Field(..., description="Date revenue was received")
     description: str = Field(..., min_length=1, max_length=500, description="Revenue description")
@@ -596,3 +490,460 @@ class AIAnalysisResponse(BaseModel):
     details: dict  # Detailed breakdown
     recommendations: List[str]  # Suggested actions
     timestamp: datetime
+
+
+# ============================================================================
+# PHASE 4: Financial Reporting - Transaction Schemas
+# ============================================================================
+
+class TransactionLineItem(BaseModel):
+    """
+    Line item for transaction details (stored as JSONB).
+    
+    Used for itemized transaction details:
+    - Receipt items (bread 2x €3.50, milk 1x €2.00)
+    - Invoice lines (service €500, materials €200)
+    - Purchase orders with multiple items
+    
+    Example:
+        {
+            "description": "Workshop materials",
+            "quantity": 1,
+            "unit": "set",
+            "unit_price": Decimal("150.00"),
+            "amount": Decimal("150.00")
+        }
+    """
+    description: str = Field(..., min_length=1, max_length=255)
+    quantity: Decimal = Field(..., ge=Decimal("0.01"))
+    unit: Optional[str] = Field(None, max_length=50, description="Unit of measure (pcs, kg, hours, etc.)")
+    unit_price: Decimal = Field(..., ge=Decimal("0.00"))
+    amount: Decimal = Field(..., ge=Decimal("0.00"))
+    
+    @field_validator("amount")
+    @classmethod
+    def validate_amount_matches_quantity_price(cls, v, info):
+        """Ensure amount = quantity × unit_price (with rounding tolerance)"""
+        data = info.data
+        if "quantity" in data and "unit_price" in data:
+            calculated = data["quantity"] * data["unit_price"]
+            if abs(v - calculated) > Decimal("0.01"):  # Allow 1 cent rounding
+                raise ValueError(f"amount ({v}) must equal quantity × unit_price ({calculated})")
+        return v
+
+
+class TransactionBase(BaseModel):
+    """Base schema with common transaction fields"""
+    transaction_type: Literal["expense", "revenue"] = Field(default="expense", description="Type of transaction", alias="type")
+    transaction_date: Optional[date] = Field(default=None, description="Date of transaction (ISO 8601), defaults to today", alias="date")
+    amount: Decimal = Field(..., gt=Decimal("0"), description="Transaction amount (2 decimal places)")
+    currency: str = Field(default="EUR", max_length=3, description="Currency code (ISO 4217)")
+    category: Optional[str] = Field(None, max_length=100, description="GoBD category (Büromaterial, Lebensmittel, Honorare, etc.)")
+    vendor_name: Optional[str] = Field(None, max_length=255, description="Payee/payer name (will be normalized)", alias="vendor")
+    vat_rate: Optional[Decimal] = Field(None, ge=Decimal("0"), le=Decimal("1"), description="VAT rate (0.19 for 19%, 0.07 for 7%, 0.00 for exempt)")
+    vat_amount: Optional[Decimal] = Field(None, ge=Decimal("0"), description="Calculated VAT amount")
+    net_amount: Optional[Decimal] = Field(None, ge=Decimal("0"), description="Amount before VAT")
+    source_type: Literal["receipt_photo", "bank_statement", "invoice_pdf", "manual_entry"] = Field(default="manual_entry", description="Source of transaction data", alias="source")
+    payment_method: Optional[Literal["cash", "card", "transfer", "check", "other"]] = None
+    notes: Optional[str] = Field(None, max_length=1000, description="Additional context or notes")
+    line_items: Optional[List[TransactionLineItem]] = Field(None, description="Itemized transaction details")
+    
+    model_config = ConfigDict(populate_by_name=True)
+    
+    @field_validator("transaction_date", mode="before")
+    @classmethod
+    def set_default_date(cls, v):
+        """Set default to today if not provided"""
+        if v is None:
+            from datetime import date as date_type
+            return date_type.today()
+        return v
+    
+    @field_validator("amount", "vat_amount", "net_amount")
+    @classmethod
+    def validate_decimal_precision(cls, v):
+        """Ensure monetary values have max 2 decimal places"""
+        if v is not None and v.as_tuple().exponent < -2:
+            raise ValueError("Monetary values can have maximum 2 decimal places")
+        return v
+    
+    @field_validator("currency")
+    @classmethod
+    def validate_currency_code(cls, v):
+        """Ensure currency is valid ISO 4217 code"""
+        valid_currencies = {"EUR", "USD", "GBP", "CHF", "PLN", "CZK", "HUF"}  # Common in Germany region
+        if v.upper() not in valid_currencies:
+            raise ValueError(f"Currency {v} not supported. Valid: {valid_currencies}")
+        return v.upper()
+
+
+class TransactionCreate(TransactionBase):
+    """
+    Schema for creating new transaction.
+    
+    Can accept organization_id and project_id in request body (convenience endpoints)
+    or they can be set by the endpoint via path/query parameters.
+    
+    Example:
+        {
+            "transaction_type": "expense",
+            "transaction_date": "2025-01-15",
+            "amount": "43.55",
+            "currency": "EUR",
+            "category": "Lebensmittel",
+            "vendor_name": "REWE",
+            "vat_rate": "0.07",
+            "vat_amount": "2.85",
+            "net_amount": "40.70",
+            "source_type": "receipt_photo",
+            "payment_method": "card",
+            "organization_id": 1,
+            "project_id": 1,
+            "line_items": [
+                {
+                    "description": "Brot Vollkorn",
+                    "quantity": "2.0",
+                    "unit": "pcs",
+                    "unit_price": "3.50",
+                    "amount": "7.00"
+                }
+            ]
+        }
+    """
+    organization_id: Optional[int] = Field(None, gt=0, description="Organization ID (optional if set in endpoint)")
+    project_id: Optional[int] = Field(None, gt=0, description="Project ID (optional if not required)")
+    transaction_hash: Optional[str] = Field(None, min_length=16, max_length=16, description="SHA-256 fingerprint (optional, calculated if omitted)")
+    document_processing_id: Optional[str] = Field(None, description="UUID of source document processing record")
+    project_id: Optional[int] = Field(None, description="Project ID (optional, for project-specific expenses)")
+
+
+class TransactionUpdate(BaseModel):
+    """
+    Schema for updating transaction (all fields optional for PATCH requests).
+    
+    Only fields provided will be updated.
+    """
+    transaction_type: Optional[Literal["expense", "revenue"]] = None
+    transaction_date: Optional[date] = None
+    amount: Optional[Decimal] = Field(None, gt=Decimal("0"))
+    currency: Optional[str] = Field(None, max_length=3)
+    category: Optional[str] = Field(None, max_length=100)
+    vendor_name: Optional[str] = Field(None, max_length=255)
+    vat_rate: Optional[Decimal] = Field(None, ge=Decimal("0"), le=Decimal("1"))
+    vat_amount: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    net_amount: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    source_type: Optional[Literal["receipt_photo", "bank_statement", "invoice_pdf", "manual_entry"]] = None
+    payment_method: Optional[Literal["cash", "card", "transfer", "check", "other"]] = None
+    notes: Optional[str] = Field(None, max_length=1000)
+    line_items: Optional[List[TransactionLineItem]] = None
+    is_duplicate: Optional[bool] = Field(None, description="Mark as duplicate if manually detected")
+    duplicate_of: Optional[int] = Field(None, description="ID of original transaction if duplicate")
+
+
+class TransactionResponse(TransactionBase):
+    """
+    Schema for transaction API response.
+    
+    Includes all database fields including IDs, timestamps, and deduplication info.
+    """
+    id: int
+    organization_id: int
+    project_id: Optional[int]
+    transaction_hash: str
+    is_duplicate: bool = Field(default=False, description="Whether this is a duplicate transaction")
+    duplicate_of: Optional[int] = Field(None, description="ID of original transaction (if duplicate)")
+    is_active: bool = Field(default=True, description="Soft delete flag")
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            Decimal: lambda v: float(v)
+        }
+
+
+# ============================================================================
+# PHASE 4: Transaction Duplicate Detection Schemas
+# ============================================================================
+
+class TransactionDuplicateBase(BaseModel):
+    """Base schema for duplicate detection records"""
+    similarity_score: Decimal = Field(..., ge=Decimal("0"), le=Decimal("1"), description="Similarity score (0.0 to 1.0)")
+    resolution_strategy: Optional[Literal["auto_ignored", "manual_review", "merged", "false_positive"]] = Field(None, description="How duplicate was handled")
+
+
+class TransactionDuplicateCreate(TransactionDuplicateBase):
+    """
+    Schema for creating duplicate detection record.
+    
+    Used when OCR/AI pipeline detects a potential duplicate transaction.
+    
+    Example:
+        {
+            "original_transaction_id": 123,
+            "duplicate_transaction_id": 456,
+            "similarity_score": "1.0",
+            "resolution_strategy": "auto_ignored"
+        }
+    """
+    original_transaction_id: int = Field(..., description="ID of original transaction")
+    duplicate_transaction_id: int = Field(..., description="ID of duplicate transaction")
+
+
+class TransactionDuplicateUpdate(BaseModel):
+    """Schema for updating duplicate detection record (resolution only)"""
+    resolution_strategy: Optional[Literal["auto_ignored", "manual_review", "merged", "false_positive"]] = None
+    resolved_by: Optional[int] = Field(None, description="User ID who resolved (future use)")
+
+
+class TransactionDuplicateResponse(TransactionDuplicateBase):
+    """Response schema with database IDs and timestamps"""
+    id: int
+    original_transaction_id: int
+    duplicate_transaction_id: int
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[int] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# PHASE 4: Fee Record Schemas (German Contractor Payments)
+# ============================================================================
+
+class FeeRecordBase(BaseModel):
+    """Base schema for fee records"""
+    contractor_name: str = Field(..., min_length=1, max_length=255, description="Contractor/volunteer name")
+    contractor_id_hash: Optional[str] = Field(None, max_length=64, description="SHA-256 hashed personal ID (GDPR anonymized)")
+    service_description: str = Field(..., min_length=1, max_length=1000, description="Description of service provided")
+    gross_amount: Decimal = Field(..., gt=Decimal("0"), description="Payment amount before tax")
+    tax_withheld: Decimal = Field(default=Decimal("0"), ge=Decimal("0"), description="Tax deducted (German tax compliance)")
+    net_amount: Decimal = Field(..., ge=Decimal("0"), description="Payment after tax deduction")
+    payment_date: date = Field(..., description="Date of payment (ISO 8601)")
+    invoice_number: Optional[str] = Field(None, max_length=100, description="Invoice/receipt reference number")
+    
+    @field_validator("net_amount")
+    @classmethod
+    def validate_net_amount(cls, v, info):
+        """Ensure net_amount = gross_amount - tax_withheld"""
+        data = info.data
+        if "gross_amount" in data and "tax_withheld" in data:
+            expected = data["gross_amount"] - data["tax_withheld"]
+            if abs(v - expected) > Decimal("0.01"):  # Allow 1 cent rounding
+                raise ValueError(f"net_amount ({v}) must equal gross_amount - tax_withheld ({expected})")
+        return v
+
+
+class FeeRecordCreate(FeeRecordBase):
+    """
+    Schema for creating fee record.
+    
+    Used for German contractor/volunteer payments (Honorare).
+    
+    Example:
+        {
+            "contractor_name": "Max Mustermann",
+            "contractor_id_hash": "a7f3b2c4...",
+            "service_description": "Workshop facilitation - 3 hours @100€/hour",
+            "gross_amount": "300.00",
+            "tax_withheld": "0.00",
+            "net_amount": "300.00",
+            "payment_date": "2025-01-20",
+            "invoice_number": "HON-2025-001",
+            "organization_id": 1
+        }
+    """
+    organization_id: Optional[int] = Field(None, gt=0, description="Organization ID (optional if set in endpoint)")
+    transaction_id: Optional[int] = Field(None, description="Reference to payment transaction")
+
+
+class FeeRecordUpdate(BaseModel):
+    """Schema for updating fee record (all fields optional)"""
+    contractor_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    contractor_id_hash: Optional[str] = Field(None, max_length=64)
+    service_description: Optional[str] = Field(None, min_length=1, max_length=1000)
+    gross_amount: Optional[Decimal] = Field(None, gt=Decimal("0"))
+    tax_withheld: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    net_amount: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    payment_date: Optional[date] = None
+    invoice_number: Optional[str] = Field(None, max_length=100)
+
+
+class FeeRecordResponse(FeeRecordBase):
+    """Response schema with database IDs and timestamps"""
+    id: int
+    organization_id: int
+    transaction_id: Optional[int]
+    is_active: bool = Field(default=True, description="Soft delete flag")
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# PHASE 4: Event Cost Schemas
+# ============================================================================
+
+class CostBreakdown(BaseModel):
+    """
+    Detailed cost breakdown for an event (stored as JSONB).
+    
+    Flexible structure for different event types:
+    - venue, catering, materials, transport, equipment, etc.
+    
+    Example:
+        {
+            "venue": 300.00,
+            "catering": 250.00,
+            "materials": 200.00,
+            "transport": 100.00,
+            "equipment_rental": 50.00
+        }
+    """
+    venue: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    catering: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    materials: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    transport: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    equipment_rental: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    staff: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    permits: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    other: Optional[Decimal] = Field(None, ge=Decimal("0"), description="Other miscellaneous costs")
+    
+    def get_total(self) -> Decimal:
+        """Calculate total from all breakdown items"""
+        total = Decimal("0")
+        for field, value in self.__dict__.items():
+            if value is not None:
+                total += value
+        return total
+
+
+class EventCostBase(BaseModel):
+    """Base schema for event cost tracking"""
+    event_name: str = Field(..., min_length=1, max_length=255, description="Event or workshop name")
+    event_date: date = Field(..., description="Date of event (ISO 8601)")
+    total_cost: Decimal = Field(..., gt=Decimal("0"), description="Total event expenditure")
+    attendee_count: Optional[int] = Field(None, ge=1, description="Number of participants (if tracked)")
+    cost_per_person: Optional[Decimal] = Field(None, ge=Decimal("0"), description="Auto-calculated: total_cost / attendee_count")
+    cost_breakdown: Optional[CostBreakdown] = Field(None, description="Itemized cost breakdown")
+    
+    @field_validator("cost_per_person")
+    @classmethod
+    def validate_cost_per_person(cls, v, info):
+        """Ensure cost_per_person = total_cost / attendee_count"""
+        data = info.data
+        if "total_cost" in data and "attendee_count" in data and data["attendee_count"]:
+            expected = data["total_cost"] / Decimal(str(data["attendee_count"]))
+            if v is not None and abs(v - expected) > Decimal("0.01"):
+                raise ValueError(f"cost_per_person ({v}) must equal total_cost / attendee_count ({expected})")
+        return v
+
+
+class EventCostCreate(EventCostBase):
+    """
+    Schema for creating event cost record.
+    
+    Used for tracking workshop, event, and activity expenses.
+    
+    Example:
+        {
+            "event_name": "Youth Workshop - Digital Skills",
+            "event_date": "2025-01-25",
+            "total_cost": "850.00",
+            "attendee_count": 25,
+            "cost_per_person": "34.00",
+            "cost_breakdown": {
+                "venue": 300.00,
+                "catering": 250.00,
+                "materials": 200.00,
+                "transport": 100.00
+            },
+            "project_id": 2,
+            "organization_id": 1
+        }
+    """
+    organization_id: Optional[int] = Field(None, gt=0, description="Organization ID (optional if set in endpoint)")
+    project_id: Optional[int] = Field(None, description="Project that funded this event (optional)")
+
+
+class EventCostUpdate(BaseModel):
+    """Schema for updating event cost (all fields optional)"""
+    event_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    event_date: Optional[date] = None
+    total_cost: Optional[Decimal] = Field(None, gt=Decimal("0"))
+    attendee_count: Optional[int] = Field(None, ge=1)
+    cost_per_person: Optional[Decimal] = Field(None, ge=Decimal("0"))
+    cost_breakdown: Optional[CostBreakdown] = None
+
+
+class EventCostResponse(EventCostBase):
+    """Response schema with database IDs and timestamps"""
+    id: int
+    organization_id: int
+    project_id: Optional[int]
+    is_active: bool = Field(default=True, description="Soft delete flag")
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# PHASE 4: Summary and Aggregate Schemas
+# ============================================================================
+
+class FinancialSummaryByCategory(BaseModel):
+    """Summary of transactions grouped by category"""
+    category: str
+    transaction_count: int
+    total_amount: Decimal
+    average_amount: Decimal
+    min_amount: Decimal
+    max_amount: Decimal
+
+
+class FinancialSummaryResponse(BaseModel):
+    """
+    Comprehensive financial summary for organization.
+    
+    Used for dashboard and reporting endpoints.
+    """
+    organization_id: int
+    period_start: Optional[date]
+    period_end: Optional[date]
+    
+    # Transaction summary
+    total_expenses: Decimal
+    total_revenue: Decimal
+    net_balance: Decimal  # revenue - expenses
+    expense_count: int
+    revenue_count: int
+    duplicate_count: int
+    
+    # Category breakdown
+    by_category: List[FinancialSummaryByCategory]
+    
+    # Project breakdown
+    by_project: Optional[dict] = None  # {project_id: total_amount}
+    
+    # Fee summary
+    total_fees_paid: Decimal = Field(default=Decimal("0"))
+    total_tax_withheld: Decimal = Field(default=Decimal("0"))
+    fee_records_count: int = Field(default=0)
+    
+    # Event summary
+    total_event_cost: Decimal = Field(default=Decimal("0"))
+    events_count: int = Field(default=0)
+    total_event_attendees: int = Field(default=0)
+    
+    # Metadata
+    generated_at: datetime
+    
+    class Config:
+        from_attributes = True
