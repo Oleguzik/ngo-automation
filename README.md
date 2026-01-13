@@ -144,12 +144,16 @@ docker exec -it ngo_backend alembic upgrade head
 
 ---
 
-## Support
+## Contact & Support
 
-For questions about this project:
-- Check Swagger UI: http://localhost:8000/docs
-- View database: http://localhost:8090 (Adminer)
+For questions, feedback, or collaboration opportunities:
+
+- **GitHub Issues**: [Open an issue](https://github.com/oleguzik/ngo-automation/issues) for bug reports or feature requests
+- **LinkedIn**: Connect at [linkedin.com/in/oleguzik](https://www.linkedin.com/in/oleguzik/)
+- **Project Demo**: Explore the API at http://localhost:8000/docs (after running `docker-compose up`)
 
 ---
 
-Built with FastAPI, PostgreSQL, and OpenAI-compatible tooling.
+## License
+
+MIT License
