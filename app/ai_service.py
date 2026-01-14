@@ -34,7 +34,10 @@ class AIService:
     
     def extract_cost_from_text(self, text: str) -> Dict[str, Any]:
         """
-        Extract cost data from document text using OpenAI.
+        Extract cost data from document text using OpenAI Structured Outputs.
+        
+        Uses OpenAI's native Pydantic schema enforcement for guaranteed JSON compliance.
+        Reference: https://platform.openai.com/docs/guides/structured-outputs
         
         Args:
             text: Extracted text from receipt/invoice
@@ -47,93 +50,72 @@ class AIService:
             return {}
         
         system_prompt = """You are an expert at extracting cost/expense data from documents.
-        Extract the following information from the provided text and return it as JSON:
-        - date: Date of purchase (YYYY-MM-DD format or original format if unclear)
+        Extract the following information from the provided text:
+        - date: Date of purchase (YYYY-MM-DD format preferred)
         - vendor: Name of store/vendor
         - category: Category of expense (Salaries, Rent, Supplies, Transport, Services, Other)
         - description: Brief description of what was purchased
-        - amount: Total amount (as number, without currency)
+        - amount: Total amount (as number, no currency symbols)
         - currency: Currency code (EUR, USD, etc.) 
-        - items: List of individual items [{name, amount, quantity, unit}] if available
+        - items: List of individual items with name, amount, quantity, unit
         - confidence: Confidence level (0.0 to 1.0) for the extraction accuracy
         
-        Return ONLY valid JSON, no other text."""
+        Extract data accurately and return in the provided structure."""
         
-        def _one_shot_extract(user_prompt: str) -> Dict[str, Any]:
-            def _call_chat(max_param: str):
-                kwargs = dict(
+        # Use OpenAI Structured Outputs with Pydantic schema enforcement
+        # This guarantees JSON compliance and eliminates parsing errors
+        try:
+            response = self.client.beta.chat.completions.parse(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Extract cost data from this document:\n\n{text}"},
+                ],
+                response_format=schemas.ExtractedCostData,  # Pydantic schema
+            )
+            
+            # The .parsed field contains the validated Pydantic model
+            parsed_model = response.choices[0].message.parsed
+            
+            if not parsed_model:
+                logger.error("OpenAI returned empty parsed result")
+                return {}
+            
+            # Convert to dict, excluding None values
+            cleaned = json.loads(parsed_model.model_dump_json(exclude_none=True))
+            logger.info(f"Successfully extracted cost data with structured outputs: {cleaned}")
+            return cleaned
+            
+        except Exception as e:
+            logger.error(f"OpenAI structured extraction error: {e}")
+            # Fallback: Try with legacy JSON mode if structured outputs fail
+            try:
+                logger.warning("Falling back to legacy JSON mode")
+                response = self.client.chat.completions.create(
                     model=self.model,
                     temperature=0,
                     response_format={"type": "json_object"},
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "user", "content": f"Extract cost data from this document:\n\n{text}"},
                     ],
                 )
-                if max_param == "max_tokens":
-                    kwargs["max_tokens"] = 1000
-                else:
-                    kwargs["max_completion_tokens"] = 1000
-                return self.client.chat.completions.create(**kwargs)
-
-            try:
-                response = _call_chat("max_tokens")
-            except Exception as e:
-                if "max_tokens" in str(e) and "max_completion_tokens" in str(e):
-                    response = _call_chat("max_completion_tokens")
-                else:
-                    raise
-
-            result_text = (response.choices[0].message.content or "").strip()
-            if not result_text:
-                raise ValueError("Empty response from model")
-            try:
+                result_text = (response.choices[0].message.content or "").strip()
                 data = json.loads(result_text)
-            except json.JSONDecodeError:
-                match = re.search(r"\{[\s\S]*\}", result_text)
-                if not match:
-                    raise
-                data = json.loads(match.group(0))
-            return data
-
-        try:
-            # Attempt 1: standard extraction
-            raw = _one_shot_extract(f"Extract cost data from this document:\n\n{text}")
-            model = schemas.ExtractedCostData.model_validate(raw)
-            cleaned = json.loads(model.model_dump_json(exclude_none=True))
-            if not cleaned or len(cleaned.keys()) == 0:
-                raise ValueError("Validated result is empty")
-            logger.info(f"Successfully extracted cost data: {cleaned}")
-            return cleaned
-        except Exception as first_error:
-            logger.warning(f"Cost extraction attempt 1 failed: {first_error}")
-            # Attempt 2: retry with explicit schema hint
-            try:
-                retry_prompt = (
-                    "Return strictly this JSON structure with fields: "
-                    "{date, vendor, category, description, amount, currency, items:[{name, amount, quantity, unit}], confidence}. "
-                    "Numbers must be plain numbers without currency symbols. Use EUR when in doubt.\n\n"
-                    f"Document:\n\n{text}"
-                )
-                raw2 = _one_shot_extract(retry_prompt)
-                model2 = schemas.ExtractedCostData.model_validate(raw2)
-                cleaned2 = json.loads(model2.model_dump_json(exclude_none=True))
-                logger.info(f"Successfully extracted cost data (retry): {cleaned2}")
-                return cleaned2
-            except Exception as second_error:
-                logger.error(f"Cost extraction retry failed: {second_error}")
+                model = schemas.ExtractedCostData.model_validate(data)
+                cleaned = json.loads(model.model_dump_json(exclude_none=True))
+                logger.info(f"Successfully extracted cost data (fallback mode): {cleaned}")
+                return cleaned
+            except Exception as fallback_error:
+                logger.error(f"Cost extraction fallback failed: {fallback_error}")
                 return {}
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse OpenAI JSON response: {e}")
-            return {}
-        except Exception as e:
-            logger.error(f"OpenAI extraction error: {e}")
-            return {}
     
     def extract_profit_from_text(self, text: str) -> Dict[str, Any]:
         """
-        Extract profit/revenue data from document text using OpenAI.
+        Extract profit/revenue data from document text using OpenAI Structured Outputs.
+        
+        Uses OpenAI's native Pydantic schema enforcement for guaranteed JSON compliance.
+        Reference: https://platform.openai.com/docs/guides/structured-outputs
         
         Args:
             text: Extracted text from donation letter, invoice, bank statement
@@ -173,88 +155,50 @@ class AIService:
         
         Return ONLY valid JSON, no additional text."""
         
-        def _one_shot_profit(user_prompt: str) -> Dict[str, Any]:
-            def _call_chat(max_param: str):
-                kwargs = dict(
+        # Use OpenAI Structured Outputs with Pydantic schema enforcement
+        try:
+            response = self.client.beta.chat.completions.parse(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Extract profit/revenue data from this document:\n\n{text}"},
+                ],
+                response_format=schemas.ExtractedProfitData,  # Pydantic schema
+            )
+            
+            parsed_model = response.choices[0].message.parsed
+            
+            if not parsed_model:
+                logger.error("OpenAI returned empty parsed result for profit data")
+                return {}
+            
+            cleaned = json.loads(parsed_model.model_dump_json(exclude_none=True))
+            logger.info(f"Successfully extracted profit data with structured outputs: {cleaned}")
+            return cleaned
+            
+        except Exception as e:
+            logger.error(f"OpenAI structured profit extraction error: {e}")
+            # Fallback: Try with legacy JSON mode
+            try:
+                logger.warning("Falling back to legacy JSON mode for profit extraction")
+                response = self.client.chat.completions.create(
                     model=self.model,
                     temperature=0,
                     response_format={"type": "json_object"},
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "user", "content": f"Extract profit/revenue data from this document:\n\n{text}"},
                     ],
                 )
-                if max_param == "max_tokens":
-                    kwargs["max_tokens"] = 1000
-                else:
-                    kwargs["max_completion_tokens"] = 1000
-                return self.client.chat.completions.create(**kwargs)
-
-            try:
-                response = _call_chat("max_tokens")
-            except Exception as e:
-                if "max_tokens" in str(e) and "max_completion_tokens" in str(e):
-                    response = _call_chat("max_completion_tokens")
-                else:
-                    raise
-
-            result_text = (response.choices[0].message.content or "").strip()
-            if not result_text:
-                raise ValueError("Empty response from model")
-            try:
+                result_text = (response.choices[0].message.content or "").strip()
                 data = json.loads(result_text)
-            except json.JSONDecodeError:
-                match = re.search(r"\{[\s\S]*\}", result_text)
-                if not match:
-                    raise
-                data = json.loads(match.group(0))
-            return data
-
-        try:
-            raw = _one_shot_profit(f"Extract profit/revenue data from this document:\n\n{text}")
-            model = schemas.ExtractedProfitData.model_validate(raw)
-            cleaned = json.loads(model.model_dump_json(exclude_none=True))
-            if not cleaned or len(cleaned.keys()) == 0:
-                raise ValueError("Validated result is empty")
-            logger.info(f"Successfully extracted profit data: {cleaned}")
-            return cleaned
-        except Exception as first_error:
-            logger.warning(f"Profit extraction attempt 1 failed: {first_error}")
-            try:
-                retry_prompt = (
-                    "EXTRACT REVENUE/INCOME DATA (money coming IN, not going out).\n\n"
-                    "Return this exact JSON structure:\n"
-                    "{\n"
-                    "  \"date\": \"YYYY-MM-DD or original format\",\n"
-                    "  \"source\": \"donation|grant|sales|service_fee|bank_transfer|other\",\n"
-                    "  \"amount\": number (no currency symbols, just the number),\n"
-                    "  \"currency\": \"EUR|USD|GBP\",\n"
-                    "  \"donor_name\": \"name of donor/payer if available\",\n"
-                    "  \"description\": \"what is this revenue for\",\n"
-                    "  \"reference\": \"transaction ID or invoice number\",\n"
-                    "  \"transaction_items\": [{\"date\": \"...\", \"description\": \"...\", \"amount\": number}] (for bank statements),\n"
-                    "  \"confidence\": 0.0 to 1.0\n"
-                    "}\n\n"
-                    "For donation receipts: Extract the donation amount shown.\n"
-                    "For bank statements: Extract CREDIT/INCOMING transactions (+ signs or Credit column).\n"
-                    "For invoices: Extract the total amount being charged TO the client.\n\n"
-                    f"Document to analyze:\n\n{text}"
-                )
-                raw2 = _one_shot_profit(retry_prompt)
-                model2 = schemas.ExtractedProfitData.model_validate(raw2)
-                cleaned2 = json.loads(model2.model_dump_json(exclude_none=True))
-                logger.info(f"Successfully extracted profit data (retry): {cleaned2}")
-                return cleaned2
-            except Exception as second_error:
-                logger.error(f"Profit extraction retry failed: {second_error}")
+                model = schemas.ExtractedProfitData.model_validate(data)
+                cleaned = json.loads(model.model_dump_json(exclude_none=True))
+                logger.info(f"Successfully extracted profit data (fallback mode): {cleaned}")
+                return cleaned
+            except Exception as fallback_error:
+                logger.error(f"Profit extraction fallback failed: {fallback_error}")
                 return {}
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse OpenAI JSON response: {e}")
-            return {}
-        except Exception as e:
-            logger.error(f"OpenAI extraction error: {e}")
-            return {}
     
     def analyze_cost_profit_data(
         self,
