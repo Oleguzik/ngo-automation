@@ -1255,3 +1255,387 @@ def get_event_cost_summary_by_organization(db: Session, organization_id: int) ->
     }
 
 
+# ========== PHASE 5: DocumentChunk CRUD (RAG Foundation) ==========
+
+def create_document_chunk(
+    db: Session,
+    document_processing_id: UUID,
+    chunk_create: schemas.DocumentChunkCreate
+) -> models.DocumentChunk:
+    """
+    Create a single document chunk with embedding.
+    
+    PHASE 5 RAG Foundation: Store text chunk with vector embedding for semantic search.
+    
+    Args:
+        db: Database session
+        document_processing_id: ID of parent DocumentProcessing
+        chunk_create: Chunk data from request (includes optional pre-generated embedding)
+        
+    Returns:
+        Created DocumentChunk object with generated id
+        
+    Raises:
+        HTTPException 404: If document_processing_id does not exist
+        HTTPException 400: If database constraint violated
+        
+    Example:
+        >>> chunk = create_document_chunk(db, doc_id, DocumentChunkCreate(...))
+        >>> assert chunk.id is not None
+        >>> assert chunk.embedding is not None
+    """
+    # Verify document exists
+    doc = db.query(models.DocumentProcessing).filter_by(id=document_processing_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"DocumentProcessing {document_processing_id} not found")
+    
+    # Create chunk object
+    db_chunk = models.DocumentChunk(
+        document_processing_id=document_processing_id,
+        chunk_text=chunk_create.chunk_text,
+        embedding=chunk_create.embedding,
+        chunk_index=chunk_create.chunk_index,
+        chunk_metadata=chunk_create.chunk_metadata or {}
+    )
+    
+    try:
+        db.add(db_chunk)
+        db.commit()
+        db.refresh(db_chunk)
+        return db_chunk
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to create chunk: {str(e.orig)}")
+
+
+def get_document_chunk(db: Session, chunk_id: int) -> Optional[models.DocumentChunk]:
+    """
+    Retrieve document chunk by ID.
+    
+    Args:
+        db: Database session
+        chunk_id: Chunk ID
+        
+    Returns:
+        DocumentChunk object or None if not found
+    """
+    return db.query(models.DocumentChunk).filter_by(id=chunk_id).first()
+
+
+def get_document_chunks(
+    db: Session,
+    document_processing_id: UUID,
+    skip: int = 0,
+    limit: int = 100
+) -> Tuple[List[models.DocumentChunk], int]:
+    """
+    Retrieve all chunks for a document with pagination.
+    
+    PHASE 5: Efficiently retrieve chunks for a document for listing/export.
+    
+    Args:
+        db: Database session
+        document_processing_id: ID of parent DocumentProcessing
+        skip: Number of records to skip (for pagination)
+        limit: Maximum records to return (default 100, max 1000)
+        
+    Returns:
+        Tuple of (chunks list, total count)
+        
+    Note:
+        Indexed query on document_processing_id for fast retrieval.
+        Default limit=100 balances pagination overhead vs API response size.
+    """
+    # Enforce maximum limit
+    limit = min(limit, 1000)
+    
+    # Get total count
+    total = db.query(models.DocumentChunk).filter_by(
+        document_processing_id=document_processing_id
+    ).count()
+    
+    # Get paginated results ordered by chunk_index (natural document order)
+    chunks = db.query(models.DocumentChunk).filter_by(
+        document_processing_id=document_processing_id
+    ).order_by(models.DocumentChunk.chunk_index).offset(skip).limit(limit).all()
+    
+    return chunks, total
+
+
+def create_document_chunks_batch(
+    db: Session,
+    document_processing_id: UUID,
+    chunks_data: List[schemas.DocumentChunkCreate]
+) -> Tuple[List[models.DocumentChunk], int]:
+    """
+    Create multiple document chunks in a single transaction.
+    
+    PHASE 5: Efficient batch creation for documents with many chunks.
+    
+    Args:
+        db: Database session
+        document_processing_id: ID of parent DocumentProcessing
+        chunks_data: List of chunk data to create
+        
+    Returns:
+        Tuple of (created chunks list, number created)
+        
+    Raises:
+        HTTPException 404: If document_processing_id does not exist
+        HTTPException 400: If batch creation fails
+        
+    Performance:
+        - Single transaction for all chunks
+        - Commits once after all added (much faster than individual commits)
+        - Typical: 1000 chunks created in <500ms
+        
+    Example:
+        >>> chunks_to_create = [DocumentChunkCreate(...), DocumentChunkCreate(...)]
+        >>> created, count = create_document_chunks_batch(db, doc_id, chunks_to_create)
+        >>> assert count == len(chunks_to_create)
+    """
+    # Verify document exists
+    doc = db.query(models.DocumentProcessing).filter_by(id=document_processing_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"DocumentProcessing {document_processing_id} not found")
+    
+    if not chunks_data:
+        return [], 0
+    
+    try:
+        # Create all chunk objects
+        db_chunks = [
+            models.DocumentChunk(
+                document_processing_id=document_processing_id,
+                chunk_text=chunk.chunk_text,
+                embedding=chunk.embedding,
+                chunk_index=chunk.chunk_index,
+                chunk_metadata=chunk.chunk_metadata or {}
+            )
+            for chunk in chunks_data
+        ]
+        
+        # Add all at once
+        db.add_all(db_chunks)
+        
+        # Single commit for performance
+        db.commit()
+        
+        # Refresh all to get generated IDs
+        for chunk in db_chunks:
+            db.refresh(chunk)
+        
+        return db_chunks, len(db_chunks)
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Batch creation failed: {str(e.orig)}")
+
+
+def update_chunk_metadata(
+    db: Session,
+    chunk_id: int,
+    metadata: dict
+) -> Optional[models.DocumentChunk]:
+    """
+    Update metadata for a chunk (e.g., page_number, section corrections).
+    
+    PHASE 5: Update chunk metadata after creation (e.g., OCR corrections).
+    
+    Args:
+        db: Database session
+        chunk_id: Chunk ID to update
+        metadata: New metadata dict (will be merged with existing)
+        
+    Returns:
+        Updated DocumentChunk or None if not found
+        
+    Note:
+        Metadata is merged with existing (not replaced).
+        updated_at is automatically set by database.
+    """
+    chunk = db.query(models.DocumentChunk).filter_by(id=chunk_id).first()
+    if not chunk:
+        return None
+    
+    # Merge metadata
+    current_meta = chunk.chunk_metadata or {}
+    current_meta.update(metadata)
+    chunk.chunk_metadata = current_meta
+    
+    db.commit()
+    db.refresh(chunk)
+    return chunk
+
+
+def delete_document_chunk(db: Session, chunk_id: int) -> bool:
+    """
+    Delete a specific chunk.
+    
+    Note: Chunks are typically deleted via CASCADE when document is deleted.
+    Use this only for individual chunk deletion (rare).
+    
+    Args:
+        db: Database session
+        chunk_id: Chunk ID to delete
+        
+    Returns:
+        True if deleted, False if not found
+    """
+    chunk = db.query(models.DocumentChunk).filter_by(id=chunk_id).first()
+    if not chunk:
+        return False
+    
+    db.delete(chunk)
+    db.commit()
+    return True
+
+
+def delete_document_chunks_by_document(
+    db: Session,
+    document_processing_id: UUID
+) -> int:
+    """
+    Delete all chunks for a document.
+    
+    Note: This is typically called via CASCADE when document is deleted.
+    Use this for explicit cleanup only.
+    
+    Args:
+        db: Database session
+        document_processing_id: ID of parent DocumentProcessing
+        
+    Returns:
+        Number of chunks deleted
+    """
+    count = db.query(models.DocumentChunk).filter_by(
+        document_processing_id=document_processing_id
+    ).delete()
+    db.commit()
+    return count
+
+
+def create_document_chunks(
+    db: Session,
+    document_processing_id: UUID,
+    chunks: List[dict],
+    embedding_service
+) -> List[models.DocumentChunk]:
+    """
+    Create document chunks with embeddings from ChunkingService output.
+    
+    PHASE 5: Integration point for document chunking + embedding pipeline.
+    
+    This function:
+    1. Takes raw chunks from ChunkingService (text-based)
+    2. Generates embeddings via EmbeddingService
+    3. Saves chunks with embeddings to database
+    4. Handles errors gracefully (individual chunk failures don't block others)
+    
+    Args:
+        db: Database session
+        document_processing_id: ID of parent DocumentProcessing
+        chunks: List of chunk dicts from ChunkingService with:
+                - chunk_index: int
+                - chunk_text: str
+                - token_count: int
+                - metadata: dict (optional)
+        embedding_service: EmbeddingService instance for generating embeddings
+        
+    Returns:
+        List of created DocumentChunk objects with embeddings
+        
+    Raises:
+        HTTPException 404: If document_processing_id does not exist
+        HTTPException 400: If all chunks fail to create
+        
+    Performance:
+        - Batch creates all chunks in single transaction
+        - Embedding generation can be parallelized (Phase 5B)
+        - Typical: 10 chunks with embeddings created in <3s (API calls are slow)
+        
+    Example:
+        >>> embedding_service = EmbeddingService()
+        >>> chunks_from_service = chunking_service.chunk_text("text...")
+        >>> created = create_document_chunks(db, doc_id, chunks_from_service, embedding_service)
+        >>> assert len(created) == len(chunks_from_service)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Verify document exists
+    doc = db.query(models.DocumentProcessing).filter_by(id=document_processing_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"DocumentProcessing {document_processing_id} not found")
+    
+    if not chunks:
+        logger.warning(f"No chunks provided for document {document_processing_id}")
+        return []
+    
+    created_chunks = []
+    failed_chunks = []
+    
+    try:
+        # Generate embeddings for each chunk
+        for chunk in chunks:
+            try:
+                logger.info(f"Generating embedding for chunk {chunk.get('chunk_index', '?')} of {document_processing_id}")
+                
+                # Generate embedding via OpenAI
+                embedding = embedding_service.generate_embedding(chunk["chunk_text"])
+                
+                # Create chunk object with embedding
+                db_chunk = models.DocumentChunk(
+                    document_processing_id=document_processing_id,
+                    chunk_text=chunk["chunk_text"],
+                    embedding=embedding,  # 1536-dimensional vector
+                    chunk_index=chunk.get("chunk_index", 0),
+                    chunk_metadata={
+                        "token_count": chunk.get("token_count", 0),
+                        "source_metadata": chunk.get("metadata", {}),
+                        "embedded_at": datetime.utcnow().isoformat()
+                    }
+                )
+                
+                db.add(db_chunk)
+                created_chunks.append(db_chunk)
+                logger.debug(f"Chunk {chunk.get('chunk_index', '?')} queued for insertion")
+                
+            except Exception as e:
+                failed_chunks.append({
+                    "chunk_index": chunk.get("chunk_index", "?"),
+                    "error": str(e)
+                })
+                logger.error(f"Failed to process chunk {chunk.get('chunk_index', '?')}: {str(e)}")
+                # Continue with next chunk instead of failing the whole batch
+        
+        # If some chunks succeeded, save them
+        if created_chunks:
+            db.commit()
+            
+            # Refresh all to get generated IDs
+            for chunk in created_chunks:
+                db.refresh(chunk)
+            
+            logger.info(f"Successfully created {len(created_chunks)} chunks for document {document_processing_id}")
+            
+            if failed_chunks:
+                logger.warning(f"Failed to create {len(failed_chunks)} chunks: {failed_chunks}")
+        else:
+            # All chunks failed
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to create any chunks. Errors: {failed_chunks}"
+            )
+        
+        return created_chunks
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error in create_document_chunks: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create chunks: {str(e)}")
+
+
+

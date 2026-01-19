@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # Initialize AI Service
 ai_service = AIService()
 
-# Create database tables
+# Create database tables from SQLAlchemy models
+# (Will be managed by Alembic migrations after initial setup)
 Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
@@ -794,6 +795,7 @@ async def upload_pdf_with_ai_extraction(
     organization_id: int,
     file: UploadFile = File(...),
     analysis_type: str = Query("cost", regex="^(cost|profit)$"),
+    enable_rag: bool = Query(False, description="Enable RAG chunking and embedding (Phase 5)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -804,16 +806,18 @@ async def upload_pdf_with_ai_extraction(
     2. Extract text from PDF using PyPDF2
     3. Analyze with OpenAI GPT-4 (extract cost or profit data)
     4. Store raw text and structured data in database
-    5. Return processing results
+    5. [Optional Phase 5] Chunk, embed, and store for RAG if enable_rag=True
     
     **Parameters:**
     - file: PDF file to upload (required)
     - analysis_type: "cost" for expenses or "profit" for revenue (default: cost)
+    - enable_rag: Enable RAG chunking and embedding (default: false)
     
     **Returns:**
     - Document record with extracted_data (JSON) and processing_status
+    - If enable_rag=True: includes chunks_created count in metadata
     
-    **Example Response:**
+    **Example Response (without RAG):**
     ```json
     {
       "id": "uuid",
@@ -828,6 +832,22 @@ async def upload_pdf_with_ai_extraction(
         "confidence": 0.95
       },
       "processing_status": "completed"
+    }
+    ```
+    
+    **Example Response (with RAG):**
+    ```json
+    {
+      "id": "uuid",
+      "file_name": "invoice.pdf",
+      "raw_text": "INVOICE\\nDigital Solutions GmbH...",
+      "extracted_data": {...},
+      "processing_status": "completed",
+      "metadata": {
+        "chunks_created": 5,
+        "embeddings_generated": 5,
+        "rag_enabled": true
+      }
     }
     ```
     """
@@ -935,6 +955,62 @@ async def upload_pdf_with_ai_extraction(
         db.refresh(doc)
         
         logger.info(f"Document saved successfully: {doc.id}")
+        
+        # Phase 5: RAG processing (chunking + embedding)
+        if enable_rag:
+            try:
+                from app.chunking_service import ChunkingService
+                from app.embedding_service import EmbeddingService
+                
+                logger.info(f"Starting RAG processing for document {doc.id}")
+                
+                # Chunk the document
+                chunking_service = ChunkingService()
+                chunks = chunking_service.chunk_text(
+                    raw_text,
+                    chunk_size=500,
+                    overlap=50,
+                    strategy="fixed",
+                    metadata={"source": file.filename, "org_id": organization_id}
+                )
+                logger.info(f"Created {len(chunks)} chunks for document {doc.id}")
+                
+                # Generate embeddings and save chunks
+                embedding_service = EmbeddingService()
+                saved_chunks = crud.create_document_chunks(
+                    db=db,
+                    document_processing_id=doc.id,
+                    chunks=chunks,
+                    embedding_service=embedding_service
+                )
+                
+                logger.info(f"Saved {len(saved_chunks)} chunks with embeddings for document {doc.id}")
+                
+                # Update document metadata
+                if doc.metadata is None:
+                    doc.metadata = {}
+                doc.metadata["chunks_created"] = len(saved_chunks)
+                doc.metadata["embeddings_generated"] = len(saved_chunks)
+                doc.metadata["rag_enabled"] = True
+                doc.metadata["rag_status"] = "completed"
+                
+                db.add(doc)
+                db.commit()
+                db.refresh(doc)
+                
+                logger.info(f"RAG processing completed for document {doc.id}")
+                
+            except Exception as e:
+                logger.error(f"RAG processing failed for document {doc.id}: {str(e)}")
+                # Log error but don't fail the upload - document is already saved
+                if doc.metadata is None:
+                    doc.metadata = {}
+                doc.metadata["rag_error"] = str(e)
+                doc.metadata["rag_status"] = "failed"
+                db.add(doc)
+                db.commit()
+                db.refresh(doc)
+        
         return doc
         
     except HTTPException:

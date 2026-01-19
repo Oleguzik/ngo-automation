@@ -15,6 +15,7 @@ Vector embeddings (pgvector) will be used for semantic search once Phase 2 Full 
 from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Date, ForeignKey, JSON, DECIMAL, Table, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+from pgvector.sqlalchemy import Vector
 from datetime import datetime, date
 from decimal import Decimal
 from uuid import uuid4
@@ -298,6 +299,96 @@ class DocumentProcessing(Base):
     
     def __repr__(self):
         return f"<DocumentProcessing(id={self.id}, file='{self.file_name}', status='{self.processing_status}')>"
+
+
+# ============================================================================
+# PHASE 5: RAG Foundation - Vector Search & Semantic Q&A
+# ============================================================================
+
+class DocumentChunk(Base):
+    """
+    Text chunk with vector embedding for semantic search.
+    
+    PHASE 5 RAG Foundation: Split documents into chunks, embed with OpenAI,
+    store vectors for similarity search and RAG retrieval.
+    
+    From spec (00-spec-rag-implementation.md):
+    - 500 tokens per chunk (tunable, default recommended)
+    - 50 token overlap for context continuity
+    - 1536-dimensional embeddings (OpenAI text-embedding-3-small)
+    - Cosine similarity search via pgvector
+    
+    Attributes:
+        id: Unique identifier (auto-increment)
+        document_processing_id: Foreign key to DocumentProcessing (source document)
+        chunk_text: Text content of chunk (up to ~2000 characters ~ 500 tokens)
+        embedding: Vector embedding (1536 dimensions) for semantic search
+        chunk_index: Position of chunk within document (0, 1, 2, ...)
+        metadata: Additional metadata as JSON (page_number, section, language, etc.)
+        created_at: Chunk creation timestamp
+        updated_at: Last modification timestamp
+        
+    Relationships:
+        - document_processing: The source document this chunk came from
+        
+    Indexing:
+        - IVFFlat index on embedding column for fast similarity search
+        - Index on document_processing_id for batch retrieval
+        
+    Vector Search Usage:
+        - Query: SELECT * FROM document_chunks 
+                 ORDER BY embedding <=> query_vector
+                 LIMIT 5
+        - Min similarity threshold: 0.7 (cosine similarity)
+        - Retrieval time: <100ms for 1M vectors with IVFFlat
+        
+    Reference:
+        - Spec: docs/00-spec-rag-implementation.md Section 3
+        - Architecture: docs/02-architecture-phase5.md Section 4
+        - Implementation: docs/PHASE5_IMPLEMENTATION_GUIDE.md
+    """
+    
+    __tablename__ = "document_chunks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Foreign key to source document
+    document_processing_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("document_processing.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    
+    # Chunk content
+    chunk_text = Column(Text, nullable=False)  # Up to ~2000 chars (500 tokens)
+    
+    # Vector embedding (1536 dimensions for text-embedding-3-small)
+    embedding = Column(Vector(1536), nullable=False)
+    
+    # Chunk position in document
+    chunk_index = Column(Integer, nullable=False)
+    
+    # Optional chunk metadata (page number, section, language, etc.)
+    # Named chunk_metadata (not 'metadata') because 'metadata' is reserved by SQLAlchemy
+    chunk_metadata = Column(JSONB, default={}, nullable=True)
+    
+    # Timestamps for audit trail
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationship to source document
+    document_processing = relationship(
+        "DocumentProcessing",
+        foreign_keys=[document_processing_id],
+        backref="chunks"
+    )
+    
+    def __repr__(self):
+        return (
+            f"<DocumentChunk(id={self.id}, doc_id={self.document_processing_id}, "
+            f"chunk_idx={self.chunk_index}, text_len={len(self.chunk_text) if self.chunk_text else 0})>"
+        )
 
 
 # ============================================================================

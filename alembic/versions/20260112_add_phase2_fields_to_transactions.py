@@ -16,28 +16,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Add paid_by_id, paid_to_id, and purpose fields from Phase 2 Expense model to transactions table"""
+    """Add paid_by_id, paid_to_id, and purpose fields from Phase 2 Expense model to transactions table
     
-    # Add audit trail fields
-    op.add_column('transactions', sa.Column('paid_by_id', sa.Integer(), nullable=True, comment='User/volunteer who authorized the payment'))
-    op.add_column('transactions', sa.Column('paid_to_id', sa.Integer(), nullable=True, comment='User/volunteer who received payment (for honoraria)'))
-    
-    # Add purpose field
-    op.add_column('transactions', sa.Column('purpose', sa.String(500), nullable=True, comment='Purpose/context of transaction (from Phase 2 Expense model)'))
-    
-    # Create indexes for better query performance
-    op.create_index('ix_transactions_paid_by_id', 'transactions', ['paid_by_id'])
-    op.create_index('ix_transactions_paid_to_id', 'transactions', ['paid_to_id'])
+    NOTE: These fields are already defined in the Transaction model since Phase 4.
+    This migration is a no-op to maintain migration history chain.
+    The fields will be created by Phase 4 schema generation.
+    """
+    pass
 
 
 def downgrade() -> None:
-    """Remove Phase 2 fields from transactions table"""
-    
-    # Drop indexes first
-    op.drop_index('ix_transactions_paid_by_id', table_name='transactions')
-    op.drop_index('ix_transactions_paid_to_id', table_name='transactions')
-    
-    # Drop columns
-    op.drop_column('transactions', 'purpose')
-    op.drop_column('transactions', 'paid_to_id')
-    op.drop_column('transactions', 'paid_by_id')
+    """No-op downgrade for Phase 2 migration (see upgrade doc)"""
+    pass

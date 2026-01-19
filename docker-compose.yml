@@ -1,8 +1,6 @@
-version: '3.9'
-
 services:
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: ngo_postgres
     environment:
       POSTGRES_USER: ngo_user
@@ -12,6 +10,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init-vector.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ngo_user -d ngo_db"]
       interval: 10s
@@ -46,6 +45,8 @@ services:
       DEBUG: "false"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-100}
     depends_on:
       postgres:
         condition: service_healthy

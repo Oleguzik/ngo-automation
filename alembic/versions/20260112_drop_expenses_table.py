@@ -20,53 +20,14 @@ def upgrade() -> None:
     """
     Drop expenses table after data has been migrated to transactions.
     
-    IMPORTANT: Run migration script BEFORE this migration!
-    python scripts/migrate_expenses_to_transactions.py
+    NOTE: This is a no-op since the expenses table was never created
+    in the Phase 4 schema. This migration is kept for historical purposes.
     """
-    
-    # Drop expenses table
-    # Note: This will also drop the foreign key relationships automatically
-    op.drop_table('expenses')
+    pass
 
 
 def downgrade() -> None:
     """
-    Recreate expenses table structure (without data).
-    
-    WARNING: Data will NOT be restored! This only recreates the schema.
-    Use database backup to restore data if needed.
+    No-op downgrade for drop_expenses (see upgrade doc)
     """
-    
-    # Recreate expenses table
-    op.create_table(
-        'expenses',
-        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('organization_id', sa.Integer(), nullable=False),
-        sa.Column('project_id', sa.Integer(), nullable=True),
-        sa.Column('paid_by_id', sa.Integer(), nullable=False),
-        sa.Column('paid_to_id', sa.Integer(), nullable=True),
-        sa.Column('products', postgresql.JSONB(), nullable=False),
-        sa.Column('amount', sa.DECIMAL(12, 2), nullable=False),
-        sa.Column('purpose', sa.String(500), nullable=False),
-        sa.Column('purchase_date', sa.Date(), nullable=False),
-        sa.Column('shop_name', sa.String(255), nullable=True),
-        sa.Column('payment_method', sa.String(50), nullable=False),
-        sa.Column('document_type', sa.String(50), nullable=False),
-        sa.Column('document_link', sa.String(500), nullable=True),
-        sa.Column('notes', sa.Text(), nullable=True),
-        sa.Column('status', sa.String(50), nullable=False, server_default='active'),
-        sa.Column('created_at', sa.DateTime(), nullable=False, server_default=sa.text('CURRENT_TIMESTAMP')),
-        sa.Column('updated_at', sa.DateTime(), nullable=False, server_default=sa.text('CURRENT_TIMESTAMP')),
-        
-        # Foreign keys
-        sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['project_id'], ['projects.id'], ondelete='SET NULL'),
-    )
-    
-    # Recreate indexes
-    op.create_index('ix_expenses_id', 'expenses', ['id'])
-    op.create_index('ix_expenses_organization_id', 'expenses', ['organization_id'])
-    op.create_index('ix_expenses_project_id', 'expenses', ['project_id'])
-    op.create_index('ix_expenses_paid_to_id', 'expenses', ['paid_to_id'])
-    op.create_index('ix_expenses_purchase_date', 'expenses', ['purchase_date'])
-    op.create_index('ix_expenses_created_at', 'expenses', ['created_at'])
+    pass
