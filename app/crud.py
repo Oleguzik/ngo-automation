@@ -1638,4 +1638,342 @@ def create_document_chunks(
         raise HTTPException(status_code=500, detail=f"Failed to create chunks: {str(e)}")
 
 
+# ========== Phase 5B: RAG Query CRUD ==========
+
+def search_similar_chunks(
+    db: Session,
+    query_embedding: List[float],
+    organization_id: int,
+    top_k: int = 10,
+    min_similarity: float = 0.7
+) -> List[dict]:
+    """
+    Search for document chunks similar to query using vector similarity.
+    
+    PHASE 5B: Semantic search using pgvector cosine similarity.
+    
+    Uses pgvector <=> operator for cosine distance (1 - cosine_sim).
+    Filters by organization for multi-tenancy isolation.
+    
+    Args:
+        db: Database session
+        query_embedding: Query vector (1536 dimensions from text-embedding-3-small)
+        organization_id: Organization ID for filtering
+        top_k: Maximum number of chunks to return (default 10, max 50)
+        min_similarity: Minimum cosine similarity threshold (0.0-1.0, default 0.7)
+        
+    Returns:
+        List of dicts with:
+        - chunk_id: UUID
+        - chunk_text: str
+        - similarity_score: float (0-1)
+        - document_name: str
+        - metadata: dict (page, section, etc.)
+        
+    Raises:
+        HTTPException 400: If query_embedding has wrong dimensions
+        
+    Performance:
+        - With IVFFlat index: ~50ms for 10K chunks
+        - Without index: ~500ms (fallback to full scan)
+        
+    Example:
+        >>> from app.embedding_service import EmbeddingService
+        >>> embedding_service = EmbeddingService()
+        >>> query_vec = embedding_service.generate_embedding("tech expenses")
+        >>> results = search_similar_chunks(db, query_vec, org_id=1, top_k=5)
+        >>> assert len(results) <= 5
+        >>> assert all(0 <= r['similarity_score'] <= 1 for r in results)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Validate query embedding dimensions
+    if len(query_embedding) != 1536:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query embedding must be 1536 dimensions, got {len(query_embedding)}"
+        )
+    
+    # Validate parameters
+    if not 0.0 <= min_similarity <= 1.0:
+        raise HTTPException(status_code=400, detail="min_similarity must be between 0.0 and 1.0")
+    
+    if top_k < 1 or top_k > 50:
+        raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
+    
+    try:
+        # Cast query embedding to pgvector format
+        query_vec_str = f"[{','.join(str(x) for x in query_embedding)}]"
+        
+        # Raw SQL for vector similarity search
+        # Uses <=> operator for cosine distance: 1 - (a <-> b) = cosine_similarity
+        sql = """
+        SELECT 
+            dc.id AS chunk_id,
+            dc.chunk_text,
+            dc.chunk_metadata,
+            dp.file_name AS document_name,
+            1 - (dc.embedding <=> :query_vector::vector) AS similarity_score
+        FROM document_chunks dc
+        JOIN document_processing dp ON dc.document_processing_id = dp.id
+        WHERE dp.organization_id = :org_id
+          AND 1 - (dc.embedding <=> :query_vector::vector) > :min_similarity
+        ORDER BY dc.embedding <=> :query_vector::vector
+        LIMIT :top_k
+        """
+        
+        from sqlalchemy import text
+        
+        # Execute raw SQL query
+        result = db.execute(
+            text(sql),
+            {
+                "query_vector": query_vec_str,
+                "org_id": organization_id,
+                "min_similarity": min_similarity,
+                "top_k": top_k
+            }
+        )
+        
+        rows = result.fetchall()
+        logger.info(f"Found {len(rows)} similar chunks for org {organization_id}")
+        
+        # Format results
+        chunks = []
+        for row in rows:
+            chunk_id, chunk_text, chunk_metadata, document_name, similarity = row
+            chunks.append({
+                "chunk_id": chunk_id,
+                "chunk_text": chunk_text,
+                "similarity_score": float(similarity) if similarity else 0.0,
+                "document_name": document_name,
+                "metadata": chunk_metadata or {}
+            })
+        
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Vector search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+# ============================================================================
+# PHASE 5B: Conversation Management CRUD Operations
+# ============================================================================
+
+def create_conversation(
+    db: Session,
+    organization_id: int,
+    title: str
+) -> "models.Conversation":
+    """
+    Create a new conversation for multi-turn RAG queries.
+    
+    Args:
+        db: Database session
+        organization_id: Organization that owns the conversation
+        title: Conversation title/topic
+    
+    Returns:
+        Created Conversation object with empty messages list
+    
+    Raises:
+        ValueError: If organization not found
+    
+    Example:
+        >>> conv = create_conversation(db, org_id=1, title="Q4 Analysis")
+        >>> conv.id
+        UUID('...')
+    """
+    from uuid import uuid4
+    from datetime import datetime
+    
+    # Verify organization exists
+    org = db.query(models.Organization).filter(
+        models.Organization.id == organization_id
+    ).first()
+    if not org:
+        raise ValueError(f"Organization {organization_id} not found")
+    
+    # Create conversation
+    conversation = models.Conversation(
+        id=uuid4(),
+        organization_id=organization_id,
+        title=title,
+        messages=[]
+    )
+    
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    
+    logger.info(f"Created conversation: {conversation.id} for org {organization_id}, title='{title}'")
+    
+    return conversation
+
+
+def get_conversation(db: Session, conversation_id) -> Optional["models.Conversation"]:
+    """
+    Retrieve a conversation by ID with full message history.
+    
+    Args:
+        db: Database session
+        conversation_id: Conversation UUID
+    
+    Returns:
+        Conversation object or None if not found
+    
+    Example:
+        >>> conv = get_conversation(db, conv_id)
+        >>> len(conv.messages)
+        5
+    """
+    return db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id
+    ).first()
+
+
+def list_conversations(
+    db: Session,
+    organization_id: int,
+    skip: int = 0,
+    limit: int = 50
+) -> List["models.Conversation"]:
+    """
+    List all conversations for an organization.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        skip: Number to skip (pagination)
+        limit: Max results to return
+    
+    Returns:
+        List of Conversation objects (ordered by created_at DESC)
+    
+    Example:
+        >>> convs = list_conversations(db, org_id=1, limit=10)
+        >>> len(convs)
+        10
+    """
+    return db.query(models.Conversation).filter(
+        models.Conversation.organization_id == organization_id
+    ).order_by(models.Conversation.created_at.desc()).offset(skip).limit(limit).all()
+
+
+def add_message_to_conversation(
+    db: Session,
+    conversation_id,
+    role: str,
+    content: str,
+    sources: Optional[List[dict]] = None,
+    confidence: Optional[float] = None
+) -> "models.Conversation":
+    """
+    Add a message to a conversation and update timestamp.
+    
+    Args:
+        db: Database session
+        conversation_id: Conversation UUID
+        role: "user" or "assistant"
+        content: Message text
+        sources: List of source citations (for assistant messages)
+        confidence: Confidence score (for assistant messages)
+    
+    Returns:
+        Updated Conversation object
+    
+    Raises:
+        ValueError: If conversation not found
+    
+    Example:
+        >>> conv = add_message_to_conversation(
+        ...     db=db,
+        ...     conversation_id=conv_id,
+        ...     role="assistant",
+        ...     content="Answer text",
+        ...     sources=[...],
+        ...     confidence=0.92
+        ... )
+    """
+    from datetime import datetime
+    
+    # Get conversation
+    conversation = db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id
+    ).first()
+    
+    if not conversation:
+        raise ValueError(f"Conversation {conversation_id} not found")
+    
+    # Create message
+    message = {
+        "role": role,
+        "content": content,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+    
+    # Add optional fields for assistant messages
+    if role == "assistant":
+        if sources:
+            message["sources"] = [
+                {
+                    "document_name": s.get("document_name"),
+                    "chunk_id": str(s.get("chunk_id")),
+                    "similarity_score": s.get("similarity_score"),
+                    "page_number": s.get("page_number")
+                }
+                for s in sources
+            ]
+        if confidence is not None:
+            message["confidence"] = confidence
+    
+    # Add to messages list
+    if conversation.messages is None:
+        conversation.messages = []
+    conversation.messages.append(message)
+    conversation.updated_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(conversation)
+    
+    logger.info(
+        f"Added message to conversation {conversation_id}",
+        extra={"role": role, "message_count": len(conversation.messages)}
+    )
+    
+    return conversation
+
+
+def delete_conversation(db: Session, conversation_id) -> bool:
+    """
+    Delete a conversation by ID.
+    
+    Args:
+        db: Database session
+        conversation_id: Conversation UUID
+    
+    Returns:
+        True if deleted, False if not found
+    
+    Example:
+        >>> deleted = delete_conversation(db, conv_id)
+        >>> deleted
+        True
+    """
+    conversation = db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id
+    ).first()
+    
+    if not conversation:
+        return False
+    
+    db.delete(conversation)
+    db.commit()
+    
+    logger.info(f"Deleted conversation {conversation_id}")
+    
+    return True
+
 

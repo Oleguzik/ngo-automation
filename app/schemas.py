@@ -668,6 +668,319 @@ class ChunkingResponse(BaseModel):
     total_tokens: int = Field(..., ge=0, description="Total tokens across all chunks")
 
 
+# ========== Phase 5B: RAG Query Schemas ==========
+
+class SearchChunkResult(BaseModel):
+    """
+    Single chunk result from semantic search.
+    
+    Attributes:
+        chunk_id: Unique chunk identifier
+        chunk_text: Text content of the chunk
+        similarity_score: Cosine similarity score (0-1)
+        document_name: Name of source document
+        metadata: Optional chunk metadata
+    
+    Example:
+        {
+            "chunk_id": "uuid-1",
+            "chunk_text": "Invoice from Tech Solutions...",
+            "similarity_score": 0.95,
+            "document_name": "invoice_2025-12-15.pdf",
+            "metadata": {"page": 1}
+        }
+    """
+    chunk_id: UUID = Field(..., description="Unique chunk identifier")
+    chunk_text: str = Field(..., min_length=1, description="Chunk text content")
+    similarity_score: float = Field(..., ge=0.0, le=1.0, description="Cosine similarity (0-1)")
+    document_name: str = Field(..., description="Source document filename")
+    metadata: Optional[dict] = Field(None, description="Chunk metadata (page, section, etc.)")
+    
+    class Config:
+        from_attributes = True
+
+
+class SearchRequest(BaseModel):
+    """
+    Request for semantic document search.
+    
+    Attributes:
+        query: Search query in natural language
+        top_k: Maximum number of results to return
+        min_similarity: Minimum similarity threshold (0-1)
+    
+    Example:
+        {
+            "query": "tech expenses Q4",
+            "top_k": 5,
+            "min_similarity": 0.7
+        }
+    """
+    query: str = Field(..., min_length=1, max_length=1000, description="Search query")
+    top_k: int = Field(default=5, ge=1, le=20, description="Max results")
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0, description="Min similarity score")
+
+
+class SearchResponse(BaseModel):
+    """
+    Response from semantic search endpoint.
+    
+    Attributes:
+        query: Original search query
+        chunks: List of matching chunks with scores
+        total_results: Number of results returned
+        query_time_ms: Query execution time in milliseconds
+    
+    Example:
+        {
+            "query": "tech expenses Q4",
+            "chunks": [
+                {
+                    "chunk_id": "uuid-1",
+                    "chunk_text": "...",
+                    "similarity_score": 0.95,
+                    "document_name": "invoice.pdf",
+                    "metadata": {}
+                }
+            ],
+            "total_results": 1,
+            "query_time_ms": 1234
+        }
+    """
+    query: str = Field(..., description="Original search query")
+    chunks: List[SearchChunkResult] = Field(..., description="Matching chunks")
+    total_results: int = Field(..., ge=0, description="Number of results")
+    query_time_ms: Optional[float] = Field(None, description="Query time in milliseconds")
+
+
+# ============================================================================
+# PHASE 5B: RAG Query System - Request/Response Schemas
+# ============================================================================
+
+class SourceCitation(BaseModel):
+    """Citation source for RAG answer"""
+    document_name: str = Field(..., description="Name of source document")
+    chunk_id: UUID = Field(..., description="ID of chunk used")
+    similarity_score: float = Field(..., ge=0.0, le=1.0, description="Vector similarity score")
+    page_number: Optional[int] = Field(None, ge=1, description="Page number if available")
+    
+    class Config:
+        from_attributes = True
+
+
+class RAGRequest(BaseModel):
+    """
+    Request for RAG query endpoint.
+    
+    Attributes:
+        question: Natural language question
+        top_k: Number of chunks to retrieve
+        min_similarity: Minimum similarity threshold
+        temperature: LLM temperature (0.0-1.0, lower=more factual)
+    
+    Example:
+        {
+            "question": "How much did we spend on consulting in Q4?",
+            "top_k": 10,
+            "min_similarity": 0.7,
+            "temperature": 0.1
+        }
+    """
+    question: str = Field(..., min_length=1, max_length=1000, description="Natural language question")
+    top_k: int = Field(default=10, ge=1, le=50, description="Chunks to retrieve")
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0, description="Similarity threshold")
+    temperature: float = Field(default=0.1, ge=0.0, le=1.0, description="LLM temperature")
+
+
+class RAGResponse(BaseModel):
+    """
+    Response from RAG query endpoint.
+    
+    Attributes:
+        question: Original question
+        answer: Generated answer with citations
+        sources: List of source citations
+        confidence: Confidence score (0-1)
+        chunks_used: Number of chunks used in generation
+        query_time_ms: Total query time
+    
+    Example:
+        {
+            "question": "How much did we spend on consulting in Q4?",
+            "answer": "Based on uploaded documents, consulting costs were €15,000 in Q4 2025 [Source: invoice_2025-12-15.pdf, page 1]",
+            "sources": [
+                {
+                    "document_name": "invoice_2025-12-15.pdf",
+                    "chunk_id": "uuid-1",
+                    "similarity_score": 0.95,
+                    "page_number": 1
+                }
+            ],
+            "confidence": 0.92,
+            "chunks_used": 3,
+            "query_time_ms": 2847
+        }
+    """
+    question: str = Field(..., description="Original question")
+    answer: str = Field(..., description="Generated answer with citations")
+    sources: List[SourceCitation] = Field(..., description="Source citations")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Answer confidence score")
+    chunks_used: int = Field(..., ge=0, description="Number of chunks used")
+    query_time_ms: Optional[float] = Field(None, ge=0, description="Query time in ms")
+    
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# PHASE 5B: Conversation History & Multi-Turn Schemas
+# ============================================================================
+
+class ConversationMessage(BaseModel):
+    """
+    Single message in a conversation.
+    
+    Attributes:
+        role: "user" or "assistant"
+        content: Message text
+        timestamp: ISO 8601 timestamp
+        sources: List of source citations (for assistant messages only)
+        confidence: Confidence score (for assistant messages only)
+    
+    Example:
+        {
+            "role": "assistant",
+            "content": "Q4 consulting costs were €15,000...",
+            "timestamp": "2026-01-19T10:30:00Z",
+            "sources": [...],
+            "confidence": 0.92
+        }
+    """
+    role: Literal["user", "assistant"] = Field(..., description="Message sender role")
+    content: str = Field(..., min_length=1, description="Message text")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="ISO 8601 timestamp")
+    sources: Optional[List[SourceCitation]] = Field(None, description="Source citations (assistant only)")
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Confidence score (assistant only)")
+    
+    class Config:
+        from_attributes = True
+
+
+class ConversationCreate(BaseModel):
+    """
+    Request to create a new conversation.
+    
+    Attributes:
+        title: Conversation title/topic
+    
+    Example:
+        {
+            "title": "Q4 2025 Spending Analysis"
+        }
+    """
+    title: str = Field(..., min_length=1, max_length=255, description="Conversation title")
+
+
+class ConversationResponse(BaseModel):
+    """
+    Conversation with full message history.
+    
+    Attributes:
+        id: Conversation UUID
+        organization_id: Organization ID
+        title: Conversation title
+        messages: List of all messages in conversation
+        created_at: Creation timestamp
+        updated_at: Last update timestamp
+    
+    Example:
+        {
+            "id": "uuid-1",
+            "organization_id": 1,
+            "title": "Q4 Spending Analysis",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "How much did we spend on tech in Q4?",
+                    "timestamp": "2026-01-19T10:30:00Z"
+                },
+                {
+                    "role": "assistant",
+                    "content": "Based on documents, €15,500...",
+                    "timestamp": "2026-01-19T10:30:30Z",
+                    "sources": [...],
+                    "confidence": 0.92
+                }
+            ],
+            "created_at": "2026-01-19T10:30:00Z",
+            "updated_at": "2026-01-19T10:30:30Z"
+        }
+    """
+    id: UUID = Field(..., description="Conversation ID")
+    organization_id: int = Field(..., description="Organization ID")
+    title: str = Field(..., description="Conversation title")
+    messages: List[ConversationMessage] = Field(..., description="All messages")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    
+    class Config:
+        from_attributes = True
+
+
+class ConversationListItem(BaseModel):
+    """
+    Conversation summary for listing (without full message history).
+    
+    Attributes:
+        id: Conversation UUID
+        title: Conversation title
+        message_count: Number of messages
+        created_at: Creation timestamp
+        updated_at: Last message timestamp
+    
+    Example:
+        {
+            "id": "uuid-1",
+            "title": "Q4 Spending Analysis",
+            "message_count": 5,
+            "created_at": "2026-01-19T10:30:00Z",
+            "updated_at": "2026-01-19T10:32:00Z"
+        }
+    """
+    id: UUID = Field(..., description="Conversation ID")
+    title: str = Field(..., description="Conversation title")
+    message_count: int = Field(..., ge=0, description="Number of messages")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class MessageAddRequest(BaseModel):
+    """
+    Request to add message to conversation (user question).
+    
+    The endpoint will:
+    1. Add user message to conversation
+    2. Use RAGService to generate answer
+    3. Add assistant message with answer + sources
+    4. Return updated conversation
+    
+    Attributes:
+        question: User's natural language question
+        top_k: Max chunks to retrieve (optional)
+        min_similarity: Similarity threshold (optional)
+    
+    Example:
+        {
+            "question": "Which vendor was the largest?",
+            "top_k": 10,
+            "min_similarity": 0.7
+        }
+    """
+    question: str = Field(..., min_length=1, max_length=1000, description="User question")
+    top_k: int = Field(default=10, ge=1, le=50, description="Chunks to retrieve")
+    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0, description="Similarity threshold")
+
+
 class CostProfitSummary(BaseModel):
     """Summary of cost and profit data for analysis"""
     organization_id: int

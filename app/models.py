@@ -392,6 +392,115 @@ class DocumentChunk(Base):
 
 
 # ============================================================================
+# PHASE 5B: RAG Query System - Conversation History & Multi-Turn Support
+# ============================================================================
+
+class Conversation(Base):
+    """
+    Multi-turn conversation history for RAG queries.
+    
+    PHASE 5B RAG Query System: Store conversation threads with multiple user
+    questions and AI answers, enabling context-aware follow-up questions.
+    
+    From spec (00-spec-rag-implementation.md):
+    - Conversation = collection of messages (user questions + AI answers)
+    - Each message includes: role (user/assistant), content, timestamp, sources
+    - Messages stored in JSONB for flexibility (can add metadata)
+    - Context window: last 5 messages used for follow-up prompts
+    - Enables: "Which vendor was the largest?" → refers to previous question
+    
+    Attributes:
+        id: Unique conversation ID (UUID)
+        organization_id: Organization this conversation belongs to
+        title: Conversation title/topic (e.g., "Q4 Spending Analysis")
+        messages: JSONB array of messages with structure:
+            [
+                {
+                    "role": "user|assistant",
+                    "content": "Question or answer text",
+                    "timestamp": "2026-01-19T10:30:00Z",
+                    "sources": [  # For assistant messages only
+                        {
+                            "document_name": "invoice.pdf",
+                            "chunk_id": "uuid",
+                            "similarity_score": 0.94,
+                            "page_number": 1
+                        }
+                    ],
+                    "confidence": 0.92  # For assistant messages only
+                }
+            ]
+        created_at: Conversation creation timestamp
+        updated_at: Last message timestamp
+        
+    Relationships:
+        - organization: The organization this conversation belongs to
+        
+    Indexing:
+        - Index on (organization_id, created_at) for list queries
+        - Index on updated_at for recent conversations
+        
+    Multi-Turn Context:
+        - When answering follow-up, last 5 messages included in prompt
+        - Helps GPT understand pronouns and context
+        - Max 5 messages limit to manage token usage
+        
+    Reference:
+        - Spec: docs/00-spec-rag-implementation.md Section 5B
+        - Architecture: docs/02-architecture-phase5.md Section 3
+    """
+    
+    __tablename__ = "conversations"
+    
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    
+    # Organization this conversation belongs to
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    
+    # Conversation title/topic
+    title = Column(String(255), nullable=False)
+    
+    # Messages as JSONB array
+    # Structure: [{"role": "user|assistant", "content": "...", "timestamp": "...", ...}]
+    messages = Column(JSONB, default=list, nullable=False)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationship to organization
+    organization = relationship(
+        "Organization",
+        foreign_keys=[organization_id],
+        backref="conversations"
+    )
+    
+    def __repr__(self):
+        msg_count = len(self.messages) if self.messages else 0
+        return f"<Conversation(id={self.id}, org={self.organization_id}, title='{self.title}', msgs={msg_count})>"
+    
+    def get_context_messages(self, limit: int = 5) -> list:
+        """
+        Get last N messages for context injection into prompts.
+        
+        Args:
+            limit: Max messages to return (default 5)
+        
+        Returns:
+            List of last N messages (or all if fewer than limit)
+        
+        Example:
+            >>> conv.messages = [msg1, msg2, msg3, msg4, msg5, msg6]
+            >>> conv.get_context_messages(5)
+            [msg2, msg3, msg4, msg5, msg6]  # Last 5
+        """
+        if not self.messages:
+            return []
+        return list(self.messages[-limit:]) if len(self.messages) > limit else list(self.messages)
+
+
+# ============================================================================
 # PHASE 4: Financial Reporting System with AI-Powered Transaction Extraction
 # ============================================================================
 
