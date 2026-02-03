@@ -14,3 +14,12 @@ PyPDF2>=3.0.0
 pgvector==0.2.4
 tiktoken>=0.5.0
 tenacity>=8.2.0
+
+# Langfuse - Observability & Prompt Experimentation (Phase 5C)
+langfuse>=2.0.0
+
+# Document Processing - XLSX, CSV, Images (Phase 3 MVP Extension)
+openpyxl>=3.1.0
+pandas>=2.0.0
+pytesseract>=0.3.10
+Pillow>=10.0.0

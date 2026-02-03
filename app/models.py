@@ -90,6 +90,9 @@ class Organization(Base):
     # back_populates: Bidirectional relationship (org.projects ↔ project.organization)
     projects = relationship("Project", back_populates="organization", cascade="all,delete")
     
+    # Phase 5C: Agent Orchestration
+    agent_tasks = relationship("AgentTask", back_populates="organization", cascade="all,delete")
+    
     def __repr__(self):
         """String representation for debugging"""
         return f"<Organization(id={self.id}, name='{self.name}', email='{self.email}')>"
@@ -943,4 +946,123 @@ class EventCost(Base):
 #
 # ============================================================================
 # END OF PHASE 2 FULL MODELS (DEFERRED)
+# ============================================================================
+
+
+# ============================================================================
+# PHASE 5C: Agent Orchestration Models
+# ============================================================================
+
+class AgentTask(Base):
+    """
+    Multi-step agent task with planning and execution tracking.
+    
+    Represents a complex analysis task that requires multiple steps
+    to complete (e.g., "Analyze Q4 spending and recommend cuts").
+    
+    Relationships:
+        - organization: Parent organization
+        - steps: Individual execution steps (AgentStep)
+    
+    Lifecycle:
+        pending → planning → executing → completed/failed
+    """
+    __tablename__ = "agent_tasks"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Task definition
+    objective = Column(Text, nullable=False)  # User's goal
+    context = Column(JSONB, default=dict)  # Additional context for planning
+    
+    # Planning
+    plan = Column(JSONB, default=list)  # List of planned steps
+    max_steps = Column(Integer, default=10)
+    
+    # Execution tracking
+    status = Column(String(50), default="pending", nullable=False, index=True)  # pending|planning|executing|completed|failed
+    current_step = Column(Integer, default=0)
+    
+    # Results
+    result = Column(JSONB)  # Final synthesized result
+    error_message = Column(Text)  # Error details if failed
+    
+    # Cost tracking
+    total_tokens_used = Column(Integer, default=0)
+    total_cost_usd = Column(DECIMAL(10, 6), default=Decimal('0.0'))
+    
+    # Observability
+    langfuse_trace_id = Column(String(255))  # Link to Langfuse trace
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    organization = relationship("Organization", back_populates="agent_tasks")
+    steps = relationship("AgentStep", back_populates="task", cascade="all, delete-orphan", order_by="AgentStep.step_number")
+    
+    def __repr__(self):
+        return f"<AgentTask(id={self.id}, objective='{self.objective[:30]}...', status='{self.status}')>"
+
+
+class AgentStep(Base):
+    """
+    Individual step in agent task execution.
+    
+    Logs each action taken by the agent during task execution,
+    including inputs, outputs, costs, and errors.
+    
+    Relationships:
+        - task: Parent AgentTask
+    
+    Lifecycle:
+        pending → running → completed/error
+    """
+    __tablename__ = "agent_steps"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4, index=True)
+    task_id = Column(UUID(as_uuid=True), ForeignKey("agent_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Step identification
+    step_number = Column(Integer, nullable=False)  # 1, 2, 3, ...
+    step_name = Column(String(255), nullable=False)  # "fetch_transactions", "calculate_trends"
+    
+    # Step definition
+    action = Column(String(100), nullable=False)  # Tool to use: "rag_query", "data_fetch", "calculate"
+    input_data = Column(JSONB, default=dict)  # Tool input parameters
+    
+    # Execution results
+    status = Column(String(50), default="pending", nullable=False)  # pending|running|completed|error
+    output_data = Column(JSONB)  # Tool output
+    error_message = Column(Text)
+    
+    # LLM interaction (if applicable)
+    llm_prompt = Column(Text)  # Prompt sent to LLM
+    llm_response = Column(Text)  # Raw LLM response
+    
+    # Cost tracking
+    tokens_used = Column(Integer, default=0)
+    cost_usd = Column(DECIMAL(10, 6), default=Decimal('0.0'))
+    
+    # Performance
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    duration_seconds = Column(DECIMAL(10, 3))
+    
+    # Observability
+    langfuse_span_id = Column(String(255))  # Link to Langfuse span
+    
+    # Relationships
+    task = relationship("AgentTask", back_populates="steps")
+    
+    def __repr__(self):
+        return f"<AgentStep(id={self.id}, task_id={self.task_id}, step_number={self.step_number}, status='{self.status}')>"
+
+
+# ============================================================================
+# END OF PHASE 5C MODELS
 # ============================================================================

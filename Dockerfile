@@ -3,9 +3,15 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
+# - gcc: C compiler for Python packages
+# - postgresql-client: For DB migrations and CLI
+# - tesseract-ocr: OCR engine for image text extraction
+# - tesseract-ocr-deu: German language support for OCR (Phase 3 MVP)
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    tesseract-ocr \
+    tesseract-ocr-deu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

@@ -6,12 +6,13 @@ PHASE 3: Cost & Profit Analysis with LLM
 - Analyze cost patterns
 - Generate profit/loss insights
 - Provide cost optimization recommendations
+- Support for both unstructured text and structured table data (XLSX, CSV)
 """
 
 from openai import OpenAI
 from app.config import settings
 from app import schemas
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from decimal import Decimal
 import json
 import logging
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AIService:
-    """OpenAI-based AI service for cost/profit analysis"""
+    """OpenAI-based AI service for cost/profit analysis with structured data support"""
     
     def __init__(self):
         """Initialize OpenAI client"""
@@ -32,35 +33,331 @@ class AIService:
             self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
             self.model = settings.OPENAI_MODEL
     
+    def _extract_from_structured_data(self, text: str, analysis_type: str = "cost") -> Optional[Dict[str, Any]]:
+        """
+        Parse structured table data (spreadsheets, CSV) directly before AI processing.
+        
+        Identifies table headers and extracts rows, avoiding AI confusion with structured format.
+        Falls back to None if not a table format.
+        
+        Args:
+            text: Extracted text (may contain table with pipe separators)
+            analysis_type: "cost" or "profit" to determine what to extract
+            
+        Returns:
+            Extracted structured data dict, or None if not a table format
+        """
+        try:
+            logger.debug(f"Starting structured data extraction (type={analysis_type})")
+            
+            # Check if this looks like a table (has pipe separators and headers)
+            lines = text.strip().split('\n')
+            logger.debug(f"Text has {len(lines)} lines")
+            if len(lines) < 2:
+                logger.debug("Not enough lines for a table")
+                return None  # Not enough lines for a table
+            
+            # Look for pipe-separated headers
+            has_pipes = any('|' in line for line in lines[:3])
+            if not has_pipes:
+                logger.debug("No pipe separators found in first 3 lines")
+                return None  # Not a pipe-separated table
+            
+            logger.debug("Detected pipe-separated format")
+            
+            # Parse header row - look for financial keywords
+            # Common header keywords in German and English
+            header_keywords = [
+                'datum', 'date', 'beschreibung', 'description', 'betrag', 'amount',
+                'kategorie', 'category', 'einnahmen', 'income', 'ausgaben', 'expense',
+                'vendor', 'lieferant', 'kost', 'total', 'summe'
+            ]
+            
+            header_line = None
+            data_start_idx = 0
+            
+            for idx, line in enumerate(lines):
+                if '|' in line:
+                    # Skip separator lines (all dashes)
+                    cleaned = line.replace('|', '').replace('-', '').replace('=', '').replace('>', '').strip()
+                    if not cleaned or not any(c.isalnum() for c in cleaned):
+                        continue
+                    
+                    # Check if this line contains header keywords
+                    line_lower = line.lower()
+                    has_keyword = any(keyword in line_lower for keyword in header_keywords)
+                    
+                    if has_keyword:
+                        header_line = line
+                        data_start_idx = idx + 1
+                        logger.debug(f"Found header with keywords at line {idx}: {header_line[:80]}")
+                        break
+            
+            if not header_line:
+                logger.warning("Could not find header line")
+                return None
+            
+            # Parse headers
+            headers = [h.strip().lower() for h in header_line.split('|') if h.strip()]
+            logger.info(f"Detected table headers: {headers}")
+            
+            if not headers:
+                return None
+            
+            # Detect complex dual-column formats (Einnahmen + Ausgaben in same row)
+            header_str = ' '.join(headers)
+            has_income = 'einnahmen' in header_str or 'income' in header_str
+            has_expense = 'ausgaben' in header_str or 'expense' in header_str or 'cost' in header_str
+            
+            if has_income and has_expense:
+                logger.warning(f"Detected complex dual-column format (Income + Expenses). Falling back to AI extraction.")
+                return None  # Let AI handle complex layouts
+            
+            # Parse first data row
+            if data_start_idx >= len(lines):
+                logger.warning("No data rows after header")
+                return None
+            
+            data_row = None
+            for idx in range(data_start_idx, len(lines)):
+                line = lines[idx].strip()
+                logger.info(f"Checking line {idx} for data: '{line[:40] if line else 'EMPTY'}'")
+                # Skip empty lines
+                if not line:
+                    logger.info(f"  Line {idx} is empty, skipping")
+                    continue
+                # Skip separator lines (all dashes and pipes, no alphanumeric)
+                non_separator_chars = line.replace('|', '').replace('-', '')
+                is_separator_line = not any(c.isalnum() for c in non_separator_chars)
+                logger.info(f"  Line {idx} separator check: is_separator={is_separator_line}")
+                if is_separator_line:
+                    logger.info(f"  Line {idx} is separator line, skipping")
+                    continue
+                # Must have pipe character
+                if '|' not in line:
+                    logger.info(f"  Line {idx} has no pipe, skipping")
+                    continue
+                    
+                # This is a data line
+                parts = [p.strip() for p in line.split('|') if p.strip()]
+                logger.info(f"  Line {idx} has {len(parts)} parts (need >= {len(headers) - 1})")
+                if len(parts) >= len(headers) - 1:  # Allow one less part
+                    data_row = parts
+                    logger.info(f"  -> FOUND DATA ROW at line {idx}: {parts}")
+                    break
+                else:
+                    logger.info(f"  -> Not enough parts ({len(parts)} < {len(headers) - 1}), continuing")
+            
+            if not data_row:
+                logger.warning("Could not find data row")
+                return None
+            
+            # Map values to headers
+            row_dict = {}
+            for i, header in enumerate(headers):
+                if i < len(data_row):
+                    row_dict[header] = data_row[i]
+            
+            logger.info(f"Parsed table row: {row_dict}")
+            
+            # Build structured response based on analysis type
+            if analysis_type == "cost":
+                result = self._build_cost_from_row(row_dict, headers, lines, data_start_idx)
+            else:  # profit
+                result = self._build_profit_from_row(row_dict, headers, lines, data_start_idx)
+            
+            if result:
+                logger.info(f"Successfully extracted {analysis_type} data from table: {result}")
+            else:
+                logger.warning(f"_build_{analysis_type}_from_row returned None")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Structured data parsing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _build_cost_from_row(self, row_dict: Dict[str, str], headers: list, all_lines: list, data_start_idx: int) -> Optional[Dict[str, Any]]:
+        """Build ExtractedCostData from parsed table row."""
+        try:
+            logger.debug(f"Building cost from row_dict: {row_dict}")
+            
+            # Map common column names (German and English)
+            date_val = (row_dict.get('datum') or row_dict.get('date') or 
+                       row_dict.get('date_val') or '')
+            description = (row_dict.get('beschreibung') or row_dict.get('description') or 
+                          row_dict.get('item') or row_dict.get('name') or '')
+            amount_str = (row_dict.get('betrag (eur)') or row_dict.get('amount') or 
+                         row_dict.get('betrag') or '')
+            category_val = row_dict.get('kategorie') or row_dict.get('category') or ''
+            
+            logger.debug(f"Extracted values - date: {date_val}, desc: {description}, amount_str: {amount_str}, cat: {category_val}")
+            
+            # Parse amount
+            amount = None
+            if amount_str:
+                try:
+                    amount_str_clean = amount_str.replace('€', '').replace(',', '.').strip()
+                    amount = float(amount_str_clean)
+                    logger.debug(f"Parsed amount: {amount} from {amount_str}")
+                except Exception as parse_err:
+                    logger.debug(f"Failed to parse amount '{amount_str}': {parse_err}")
+            
+            if amount is None or amount == 0:
+                logger.warning(f"No valid amount found in row: {row_dict}")
+                return None  # No valid amount found
+            
+            # Build items from remaining rows if available
+            items = []
+            for idx in range(data_start_idx + 1, min(data_start_idx + 6, len(all_lines))):  # Up to 5 more rows
+                line = all_lines[idx].strip()
+                if line and '|' in line and '-' not in line.replace('|', ''):
+                    parts = [p.strip() for p in line.split('|') if p.strip()]
+                    if len(parts) >= 2:
+                        item_name = parts[0]
+                        item_amount_str = parts[-1] if len(parts) > 2 else ''
+                        try:
+                            item_amount = float(item_amount_str.replace('€', '').replace(',', '.'))
+                            items.append({
+                                "name": item_name,
+                                "amount": item_amount,
+                                "quantity": None,
+                                "unit": None
+                            })
+                        except:
+                            pass
+            
+            result = {
+                "date": date_val if date_val else None,
+                "vendor": "Financial Report" if not description or description == '-' else description,
+                "category": category_val if category_val else "Other",
+                "description": description if description else "Transaction from spreadsheet",
+                "amount": amount,
+                "currency": "EUR",
+                "items": items if items else None,
+                "confidence": 0.95  # High confidence for direct table parsing
+            }
+            
+            logger.info(f"Built cost result: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to build cost from row: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _build_profit_from_row(self, row_dict: Dict[str, str], headers: list, all_lines: list, data_start_idx: int) -> Optional[Dict[str, Any]]:
+        """Build ExtractedProfitData from parsed table row."""
+        try:
+            # Map common column names (German and English)
+            date_val = (row_dict.get('datum') or row_dict.get('date') or 
+                       row_dict.get('date_val') or '')
+            description = (row_dict.get('beschreibung') or row_dict.get('description') or 
+                          row_dict.get('source') or row_dict.get('name') or '')
+            amount_str = (row_dict.get('betrag (eur)') or row_dict.get('amount') or 
+                         row_dict.get('betrag') or '')
+            category_val = row_dict.get('kategorie') or row_dict.get('category') or row_dict.get('type') or ''
+            
+            # Parse amount
+            amount = None
+            if amount_str:
+                try:
+                    amount_str_clean = amount_str.replace('€', '').replace(',', '.').strip()
+                    amount = float(amount_str_clean)
+                except:
+                    pass
+            
+            if amount is None or amount == 0:
+                return None  # No valid amount found
+            
+            # Build transaction items from remaining rows
+            transaction_items = []
+            for idx in range(data_start_idx + 1, min(data_start_idx + 6, len(all_lines))):  # Up to 5 more rows
+                line = all_lines[idx].strip()
+                if line and '|' in line and '-' not in line.replace('|', ''):
+                    parts = [p.strip() for p in line.split('|') if p.strip()]
+                    if len(parts) >= 2:
+                        item_date = parts[0]
+                        item_desc = parts[1] if len(parts) > 2 else parts[0]
+                        item_amount_str = parts[-1] if len(parts) > 1 else ''
+                        try:
+                            item_amount = float(item_amount_str.replace('€', '').replace(',', '.'))
+                            transaction_items.append({
+                                "date": item_date,
+                                "description": item_desc,
+                                "amount": item_amount
+                            })
+                        except:
+                            pass
+            
+            return {
+                "date": date_val if date_val else None,
+                "source": category_val if category_val else "financial_transaction",
+                "amount": amount,
+                "currency": "EUR",
+                "donor_name": None,
+                "description": description if description else "Financial transaction",
+                "reference": None,
+                "transaction_items": transaction_items if transaction_items else None,
+                "confidence": 0.95  # High confidence for direct table parsing
+            }
+        except Exception as e:
+            logger.debug(f"Failed to build profit from row: {e}")
+            return None
+    
     def extract_cost_from_text(self, text: str) -> Dict[str, Any]:
         """
         Extract cost data from document text using OpenAI Structured Outputs.
         
         Uses OpenAI's native Pydantic schema enforcement for guaranteed JSON compliance.
+        Handles both unstructured (receipts/invoices) and structured (tables/spreadsheets) data.
         Reference: https://platform.openai.com/docs/guides/structured-outputs
         
         Args:
-            text: Extracted text from receipt/invoice
+            text: Extracted text from receipt/invoice/spreadsheet
             
         Returns:
             Structured cost data: {date, vendor, items, amount, ...}
         """
+        # Try to extract from structured data first (tables)
+        # This works WITHOUT OpenAI API, so do it before checking client
+        structured_result = self._extract_from_structured_data(text, analysis_type="cost")
+        if structured_result:
+            logger.info(f"Extracted cost data from structured data (table): {structured_result}")
+            return structured_result
+        
+        # Only use AI if not structured data
         if not self.client:
             logger.error("OpenAI client not initialized")
             return {}
         
         system_prompt = """You are an expert at extracting cost/expense data from documents.
-        Extract the following information from the provided text:
-        - date: Date of purchase (YYYY-MM-DD format preferred)
-        - vendor: Name of store/vendor
+        The document may be:
+        - Unstructured text (receipts, invoices, free-form documents)
+        - Structured tables (spreadsheets with headers like Date, Description, Amount)
+        
+        If processing a TABLE/SPREADSHEET with column headers:
+        - Identify header row (Date | Description | Amount | Category, etc.)
+        - Extract the FIRST ROW of data as the primary transaction
+        - Use table headers to map values to fields
+        - If multiple rows exist, create items list from additional rows
+        
+        If processing free-form TEXT:
+        - Extract date, vendor, amount, description as usual
+        
+        Required fields to extract:
+        - date: Date of purchase (YYYY-MM-DD format preferred, or original format)
+        - vendor: Name of store/vendor/description from header
         - category: Category of expense (Salaries, Rent, Supplies, Transport, Services, Other)
         - description: Brief description of what was purchased
-        - amount: Total amount (as number, no currency symbols)
-        - currency: Currency code (EUR, USD, etc.) 
-        - items: List of individual items with name, amount, quantity, unit
-        - confidence: Confidence level (0.0 to 1.0) for the extraction accuracy
+        - amount: Total amount (as NUMBER only, no currency symbols)
+        - currency: Currency code (EUR, USD, etc.)
+        - items: List of individual items (if multiple rows in table)
+        - confidence: Confidence level (0.0 to 1.0) for extraction accuracy
         
-        Extract data accurately and return in the provided structure."""
+        Return data accurately in the provided structure."""
         
         # Use OpenAI Structured Outputs with Pydantic schema enforcement
         # This guarantees JSON compliance and eliminates parsing errors
@@ -115,14 +412,23 @@ class AIService:
         Extract profit/revenue data from document text using OpenAI Structured Outputs.
         
         Uses OpenAI's native Pydantic schema enforcement for guaranteed JSON compliance.
+        Handles both unstructured (donation letters) and structured (bank statements, spreadsheets) data.
         Reference: https://platform.openai.com/docs/guides/structured-outputs
         
         Args:
-            text: Extracted text from donation letter, invoice, bank statement
+            text: Extracted text from donation letter, invoice, bank statement, spreadsheet
             
         Returns:
             Structured profit data: {date, source, amount, donor_name, ...}
         """
+        # Try to extract from structured data first (tables/spreadsheets)
+        # This works WITHOUT OpenAI API, so do it before checking client
+        structured_result = self._extract_from_structured_data(text, analysis_type="profit")
+        if structured_result:
+            logger.info(f"Extracted profit data from structured data (table): {structured_result}")
+            return structured_result
+        
+        # Only use AI if not structured data
         if not self.client:
             logger.error("OpenAI client not initialized")
             return {}
@@ -131,29 +437,43 @@ class AIService:
         
         IMPORTANT: Focus on INCOMING money (revenue/income), NOT outgoing (expenses/costs).
         
+        The document may be:
+        - Unstructured text (donation receipts, grant letters, donation confirmations)
+        - Structured tables (bank statements, donation logs, revenue spreadsheets)
+        
+        If processing a TABLE/SPREADSHEET with column headers:
+        - Identify header row (Date | Description | Amount | Category, etc.)
+        - Extract the FIRST ROW of data as the primary transaction
+        - Use table headers to map values to fields
+        - If multiple rows exist, create transaction_items list from additional rows
+        
+        If processing free-form TEXT:
+        - Extract date, source, amount, donor_name as usual
+        
         Document types and what to extract:
         - DONATION RECEIPTS: Extract the donation amount, donor name, date, and purpose
         - BANK STATEMENTS: Extract ONLY the CREDIT/INCOMING transactions (look for '+' or 'Credit' column)
         - INVOICES SENT: Extract the total amount the organization is RECEIVING from clients
         - GRANT AWARDS: Extract grant amount, funding source, date
         
-        Extract these fields and return as JSON:
+        Extract these fields:
         - date: Date of transaction (YYYY-MM-DD format preferred, or original format)
         - source: Source type (donation, grant, sales, service_fee, fundraiser, bank_transfer, other)
-        - amount: Total amount RECEIVED (as plain number, no currency symbols)
+        - amount: Total amount RECEIVED (as NUMBER only, no currency symbols)
         - currency: Currency code (EUR, USD, GBP, etc.)
         - donor_name: Name of donor/payer/client if clearly stated
         - description: Clear description of what this revenue is for
         - reference: Transaction reference, invoice number, donation ID if available
-        - transaction_items: For bank statements with multiple credits, list each as {date, description, amount}
+        - transaction_items: For spreadsheets/bank statements with multiple rows, list each as {date, description, amount}
         - confidence: Your confidence level (0.0 to 1.0) in extraction accuracy
         
         Examples:
         - Donation receipt "€2,500" → amount: 2500, source: "donation"
         - Bank statement "Transfer IN: +€25,000" → amount: 25000, source: "bank_transfer"
         - Invoice "Total Due: €16,570.75" → amount: 16570.75, source: "service_fee"
+        - Table with rows → extract first row, add rest to transaction_items
         
-        Return ONLY valid JSON, no additional text."""
+        Return data accurately in the provided structure."""
         
         # Use OpenAI Structured Outputs with Pydantic schema enforcement
         try:
@@ -260,7 +580,7 @@ class AIService:
             logger.error(f"OpenAI analysis error: {e}")
             return f"Error during analysis: {str(e)}"
     
-    def identify_cost_optimization(self, cost_data: str) -> list[str]:
+    def identify_cost_optimization(self, cost_data: str) -> List[str]:
         """
         Generate cost optimization recommendations using OpenAI.
         
@@ -277,7 +597,7 @@ class AIService:
         Based on the cost data provided, suggest 3-5 specific, actionable cost reduction opportunities.
         Format your response as a JSON array of strings."""
         
-        user_message = f"Based on this cost data, what are specific ways to reduce costs?\\n\\n{cost_data}\\n\\nRespond with a JSON array of recommendations."
+        user_message = f"Based on this cost data, what are specific ways to reduce costs?\n\n{cost_data}\n\nRespond with a JSON array of recommendations."
         
         try:
             response = self.client.chat.completions.create(

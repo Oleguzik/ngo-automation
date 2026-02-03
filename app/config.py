@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://ngo_user:secure_password@postgres:5432/ngo_db"
     DEBUG: bool = False
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-5.1"
+    OPENAI_MODEL: str = "gpt-4.1-mini"  # Default - matches user's API key available models
     
     class Config:
         """Pydantic configuration to load from .env file"""

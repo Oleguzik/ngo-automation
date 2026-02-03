@@ -14,6 +14,7 @@ import logging
 from app import models, schemas, crud
 from app.database import engine, get_db, Base
 from app.pdf_utils import extract_text_from_pdf
+from app.document_utils import extract_text_from_file, get_supported_file_types
 from app.ai_service import AIService
 
 # Configure logging
@@ -799,55 +800,51 @@ async def upload_pdf_with_ai_extraction(
     db: Session = Depends(get_db)
 ):
     """
-    Upload a PDF file for AI-powered extraction and analysis.
+    Upload a document (PDF, XLSX, CSV, or image) for AI-powered extraction and analysis.
+    
+    **Supported File Types (Phase 3 MVP Extension):**
+    - PDF: Invoices, receipts, bank statements (native text extraction via PyPDF2)
+    - XLSX: Excel spreadsheets with financial data (cell-by-cell extraction)
+    - CSV: Comma-separated value files (bank exports, donation logs)
+    - Images: PNG, JPG, JPEG, GIF, BMP, TIFF (OCR text extraction via Tesseract)
     
     **Workflow:**
-    1. Upload PDF file (receipt, invoice, bank statement, donation receipt)
-    2. Extract text from PDF using PyPDF2
-    3. Analyze with OpenAI GPT-4 (extract cost or profit data)
+    1. Upload document file (any supported format)
+    2. Extract text (format-specific: PDF→PyPDF2, XLSX→openpyxl, CSV→pandas, IMG→OCR)
+    3. Analyze with OpenAI GPT-4o-mini (extract cost or profit data)
     4. Store raw text and structured data in database
     5. [Optional Phase 5] Chunk, embed, and store for RAG if enable_rag=True
     
+    **Reference:**
+    - Spec: docs/00-spec-phase4.md - Document Processing
+    - Architecture: docs/02-architecture-phase4.md - Text Extraction Pipeline
+    
     **Parameters:**
-    - file: PDF file to upload (required)
+    - file: Document file to upload (required, any supported format)
     - analysis_type: "cost" for expenses or "profit" for revenue (default: cost)
     - enable_rag: Enable RAG chunking and embedding (default: false)
     
     **Returns:**
     - Document record with extracted_data (JSON) and processing_status
+    - file_type shows detected format (pdf, xlsx, csv, image)
     - If enable_rag=True: includes chunks_created count in metadata
     
-    **Example Response (without RAG):**
+    **Example Response (XLSX cost extraction):**
     ```json
     {
       "id": "uuid",
-      "file_name": "invoice.pdf",
-      "raw_text": "INVOICE\\nDigital Solutions GmbH...",
+      "file_name": "bank_statement_jan2026.xlsx",
+      "file_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "raw_text": "--- Sheet: Transactions ---\\nDate | Amount | Vendor\\n2026-01-05 | 2500 | AWS...",
       "extracted_data": {
-        "date": "2025-12-15",
-        "vendor": "Digital Solutions GmbH",
-        "amount": 16570.75,
+        "date": "2026-01-05",
+        "vendor": "AWS",
+        "amount": 2500.0,
         "currency": "EUR",
-        "category": "consulting",
-        "confidence": 0.95
+        "category": "cloud_services",
+        "confidence": 0.93
       },
       "processing_status": "completed"
-    }
-    ```
-    
-    **Example Response (with RAG):**
-    ```json
-    {
-      "id": "uuid",
-      "file_name": "invoice.pdf",
-      "raw_text": "INVOICE\\nDigital Solutions GmbH...",
-      "extracted_data": {...},
-      "processing_status": "completed",
-      "metadata": {
-        "chunks_created": 5,
-        "embeddings_generated": 5,
-        "rag_enabled": true
-      }
     }
     ```
     """
@@ -857,15 +854,24 @@ async def upload_pdf_with_ai_extraction(
         if not org:
             raise HTTPException(status_code=404, detail="Organization not found")
         
-        # Validate file type (accept both standard PDF content types)
-        allowed_types = ["application/pdf", "application/x-pdf", "application/acrobat", "application/vnd.pdf"]
-        if file.content_type not in allowed_types and not file.filename.lower().endswith('.pdf'):
+        # Validate file type against supported formats
+        supported_types = get_supported_file_types()
+        all_mime_types = []
+        all_extensions = []
+        for category in supported_types.values():
+            all_mime_types.extend(category['mime_types'])
+            all_extensions.extend(category['extensions'])
+        
+        file_ext = "." + file.filename.lower().split(".")[-1] if "." in file.filename else ""
+        
+        if file.content_type not in all_mime_types and file_ext not in all_extensions:
+            supported_formats = " | ".join([f"{cat} ({', '.join(info['extensions'])})" for cat, info in supported_types.items()])
             raise HTTPException(
                 status_code=400, 
-                detail=f"Invalid file type: {file.content_type}. Only PDF files are supported."
+                detail=f"Unsupported file type: {file.content_type}. Supported formats: {supported_formats}"
             )
         
-        logger.info(f"Processing PDF upload: {file.filename} ({file.content_type})")
+        logger.info(f"Processing document upload: {file.filename} ({file.content_type})")
         
         # Read file bytes
         file_bytes = await file.read()
@@ -876,21 +882,30 @@ async def upload_pdf_with_ai_extraction(
         
         logger.info(f"File size: {file_size} bytes")
         
-        # Extract text from PDF
+        # Extract text using universal extractor (routes to PDF, XLSX, CSV, or OCR)
         try:
-            raw_text = extract_text_from_pdf(file_bytes)
-            logger.info(f"Extracted {len(raw_text)} characters from PDF")
+            raw_text, file_format = extract_text_from_file(file_bytes, file.content_type, file.filename)
+            
+            if file_format == "unsupported":
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Could not determine file format for: {file.filename}"
+                )
+            
+            logger.info(f"Extracted {len(raw_text) if raw_text else 0} characters from {file_format.upper()}")
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"PDF extraction failed: {str(e)}")
+            logger.error(f"Text extraction failed: {str(e)}")
             raise HTTPException(
                 status_code=422, 
-                detail=f"Failed to extract text from PDF: {str(e)}"
+                detail=f"Failed to extract text from document: {str(e)}"
             )
         
         if not raw_text or len(raw_text.strip()) < 10:
             raise HTTPException(
                 status_code=422,
-                detail="PDF appears to be empty or contains no extractable text"
+                detail=f"Document appears to be empty or contains no extractable text (format: {file_format.upper()})"
             )
         
         # AI extraction based on analysis type
@@ -2775,4 +2790,598 @@ def add_message_to_conversation_endpoint(
         raise
     except Exception as e:
         logger.error(f"Failed to add message: {str(e)}", exc_info=True)
+
+
+# ============================================================================
+# PHASE 5C: Agent Orchestration Endpoints
+# ============================================================================
+
+@app.post(
+    "/organizations/{org_id}/agent/analyze",
+    response_model=schemas.AgentTaskResponse,
+    tags=["Agent Orchestration"],
+    status_code=200,
+    summary="Execute multi-step financial analysis",
+    description="""
+    Execute complex financial analysis using multi-step agent orchestration.
+    
+    The agent will:
+    1. Generate a step-by-step execution plan
+    2. Execute each step using appropriate tools (RAG, data queries, calculations)
+    3. Synthesize findings into a comprehensive report
+    
+    **Example Objectives:**
+    - "Analyze Q4 2025 spending trends and recommend budget cuts"
+    - "Compare income vs expenses for the last 6 months"
+    - "Identify unusual transactions and potential errors"
+    - "Generate year-end financial summary with key insights"
+    
+    **Cost:** Typically $0.10 - $0.50 per complex analysis
+    **Duration:** Usually 10-30 seconds
+    """
+)
+def analyze_with_agent(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    request: schemas.AgentAnalysisRequest = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Execute multi-step agent analysis task."""
+    try:
+        # Verify organization exists
+        organization = crud.get_organization(db, org_id)
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        logger.info(f"Starting agent analysis for org {org_id}: {request.objective}")
+        
+        # Execute agent task
+        from app.orchestration_service import OrchestrationService
+        orchestrator = OrchestrationService()
+        
+        result = orchestrator.execute_task(
+            objective=request.objective,
+            organization_id=org_id,
+            db=db,
+            context=request.context,
+            max_steps=request.max_steps
+        )
+        
+        return schemas.AgentTaskResponse(**result)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Agent analysis failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Agent analysis failed: {str(e)}")
+
+
+@app.get(
+    "/organizations/{org_id}/agent/tasks",
+    response_model=schemas.AgentTaskList,
+    tags=["Agent Orchestration"],
+    summary="List agent tasks",
+    description="List all agent analysis tasks for an organization with optional status filter."
+)
+def list_agent_tasks(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    status: Optional[str] = Query(
+        None,
+        description="Filter by status (pending, planning, executing, completed, failed)"
+    ),
+    limit: int = Query(20, ge=1, le=100, description="Results per page"),
+    offset: int = Query(0, ge=0, description="Results to skip"),
+    db: Session = Depends(get_db)
+):
+    """List agent tasks for organization."""
+    try:
+        # Verify organization exists
+        organization = crud.get_organization(db, org_id)
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        # Get tasks
+        tasks = crud.list_agent_tasks(db, org_id, status, limit, offset)
+        total = crud.count_agent_tasks(db, org_id, status)
+        
+        # Convert to response format
+        task_summaries = [
+            schemas.AgentTaskSummary(
+                task_id=str(task.id),
+                objective=task.objective,
+                status=task.status,
+                steps_completed=task.current_step,
+                total_cost=float(task.total_cost_usd),
+                created_at=task.created_at,
+                completed_at=task.completed_at
+            )
+            for task in tasks
+        ]
+        
+        return schemas.AgentTaskList(
+            tasks=task_summaries,
+            total=total,
+            limit=limit,
+            offset=offset
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list agent tasks: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/organizations/{org_id}/agent/tasks/{task_id}",
+    response_model=schemas.AgentTaskDetail,
+    tags=["Agent Orchestration"],
+    summary="Get agent task details",
+    description="Get detailed information about a specific agent task including all execution steps."
+)
+def get_agent_task_details(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    task_id: str = Path(..., description="Task UUID"),
+    db: Session = Depends(get_db)
+):
+    """Get detailed agent task with all steps."""
+    try:
+        from uuid import UUID
+        
+        # Get task with steps
+        task = crud.get_agent_task_with_steps(db, UUID(task_id))
+        
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Verify organization ownership
+        if task.organization_id != org_id:
+            raise HTTPException(status_code=403, detail="Task belongs to different organization")
+        
+        # Convert steps to response format
+        steps = [
+            schemas.AgentStepDetail(
+                step_number=step.step_number,
+                step_name=step.step_name,
+                action=step.action,
+                status=step.status,
+                input_data=step.input_data,
+                output_data=step.output_data,
+                error_message=step.error_message,
+                tokens_used=step.tokens_used,
+                cost_usd=float(step.cost_usd) if step.cost_usd else 0.0,
+                duration_seconds=float(step.duration_seconds) if step.duration_seconds else None
+            )
+            for step in sorted(task.steps, key=lambda s: s.step_number)
+        ]
+        
+        # Build Langfuse trace URL
+        langfuse_url = None
+        if task.langfuse_trace_id:
+            langfuse_url = f"https://cloud.langfuse.com/trace/{task.langfuse_trace_id}"
+        
+        return schemas.AgentTaskDetail(
+            task_id=str(task.id),
+            organization_id=task.organization_id,
+            objective=task.objective,
+            context=task.context,
+            status=task.status,
+            plan=task.plan,
+            result=task.result,
+            error_message=task.error_message,
+            steps=steps,
+            total_cost=float(task.total_cost_usd),
+            total_tokens=task.total_tokens_used,
+            created_at=task.created_at,
+            started_at=task.started_at,
+            completed_at=task.completed_at,
+            langfuse_trace_url=langfuse_url
+        )
+    
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task ID format")
+    except Exception as e:
+        logger.error(f"Failed to get task details: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete(
+    "/organizations/{org_id}/agent/tasks/{task_id}",
+    tags=["Agent Orchestration"],
+    summary="Delete agent task",
+    description="Delete an agent task and all its steps."
+)
+def delete_agent_task(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    task_id: str = Path(..., description="Task UUID"),
+    db: Session = Depends(get_db)
+):
+    """Delete agent task."""
+    try:
+        from uuid import UUID
+        
+        # Get task first to verify ownership
+        task = crud.get_agent_task(db, UUID(task_id))
+        
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        if task.organization_id != org_id:
+            raise HTTPException(status_code=403, detail="Task belongs to different organization")
+        
+        # Delete task
+        crud.delete_agent_task(db, UUID(task_id))
+        
+        return {"message": "Task deleted successfully", "task_id": task_id}
+    
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task ID format")
+    except Exception as e:
+        logger.error(f"Failed to delete task: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/organizations/{org_id}/agent/cost-summary",
+    response_model=schemas.AgentCostSummary,
+    tags=["Agent Orchestration"],
+    summary="Get cost summary",
+    description="Get aggregate cost statistics for all agent tasks by organization."
+)
+def get_agent_cost_summary(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    db: Session = Depends(get_db)
+):
+    """Get agent task cost summary."""
+    try:
+        # Verify organization exists
+        organization = crud.get_organization(db, org_id)
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        summary = crud.get_agent_task_cost_summary(db, org_id)
+        
+        return schemas.AgentCostSummary(**summary)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get cost summary: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# PHASE 5C: Langfuse Advanced Features - User Feedback
+# ============================================================================
+
+@app.post(
+    "/feedback/submit",
+    response_model=schemas.UserFeedbackResponse,
+    tags=["Langfuse Feedback"],
+    summary="Submit user feedback",
+    description="""
+    Submit user feedback (thumbs up/down) for a RAG response or agent task.
+    
+    This feedback is stored in Langfuse and can be used for:
+    - Building evaluation datasets
+    - Identifying problem cases
+    - A/B testing analysis
+    - Continuous improvement
+    """
+)
+def submit_user_feedback(
+    request: schemas.UserFeedbackRequest = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Submit user feedback to Langfuse."""
+    try:
+        from langfuse import Langfuse
+        
+        # Initialize Langfuse client
+        langfuse = Langfuse()
+        
+        # Submit feedback as score
+        langfuse.score(
+            trace_id=request.trace_id,
+            name="user_feedback",
+            value=request.score,
+            comment=request.comment
+        )
+        
+        logger.info(f"User feedback submitted for trace {request.trace_id}: score={request.score}")
+        
+        return schemas.UserFeedbackResponse(
+            success=True,
+            trace_id=request.trace_id,
+            score=request.score,
+            message="Feedback recorded successfully"
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to submit feedback: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
+
+
+# ========================================
+# LANGFUSE ADVANCED FEATURES ENDPOINTS
+# ========================================
+
+@app.post("/langfuse/ab-test/create", response_model=schemas.ABTestResponse, status_code=201)
+def create_ab_test(
+    request: schemas.ABTestConfig,
+    db: Session = Depends(get_db)
+) -> schemas.ABTestResponse:
+    """
+    Create a new A/B test configuration for prompt variants.
+    
+    Args:
+        request: A/B test configuration with prompt variants and traffic split
+        db: Database session
+        
+    Returns:
+        ABTestResponse with test details
+        
+    Raises:
+        HTTPException: 400 if configuration invalid
+    """
+    try:
+        from app.langfuse_advanced_service import LangfuseAdvancedService
+        
+        service = LangfuseAdvancedService()
+        
+        # Validate configuration
+        if len(request.variants) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="A/B test requires at least 2 variants"
+            )
+        
+        total_traffic = sum(v.traffic_percentage for v in request.variants)
+        if abs(total_traffic - 1.0) > 0.001:  # Allow small floating point error
+            raise HTTPException(
+                status_code=400,
+                detail=f"Traffic percentages must sum to 1.0, got {total_traffic}"
+            )
+        
+        logger.info(f"Created A/B test '{request.test_name}' with {len(request.variants)} variants")
+        
+        return schemas.ABTestResponse(
+            test_name=request.test_name,
+            variants=[
+                schemas.PromptVariant(
+                    variant_id=v.variant_id,
+                    prompt_name=v.prompt_name,
+                    prompt_version=v.prompt_version,
+                    traffic_percentage=v.traffic_percentage
+                ) for v in request.variants
+            ],
+            status="active",
+            created_at=datetime.utcnow()
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create A/B test: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create A/B test: {str(e)}")
+
+
+@app.get("/langfuse/ab-test/{test_name}/results", response_model=schemas.ABTestResults)
+def get_ab_test_results(
+    test_name: str,
+    min_observations: int = 100,
+    db: Session = Depends(get_db)
+) -> schemas.ABTestResults:
+    """
+    Get A/B test results with statistical significance analysis.
+    
+    Args:
+        test_name: Name of the A/B test
+        min_observations: Minimum observations required for statistical significance
+        db: Database session
+        
+    Returns:
+        ABTestResults with performance comparison and significance
+        
+    Raises:
+        HTTPException: 404 if test not found
+    """
+    try:
+        from app.langfuse_advanced_service import LangfuseAdvancedService
+        
+        service = LangfuseAdvancedService()
+        results = service.get_ab_test_results(test_name, min_observations=min_observations)
+        
+        logger.info(f"Retrieved A/B test results for '{test_name}': {len(results['variants'])} variants")
+        
+        return schemas.ABTestResults(
+            test_name=test_name,
+            total_observations=results['total_observations'],
+            variants=results['variants'],
+            is_significant=results['is_significant'],
+            winning_variant=results.get('winning_variant'),
+            confidence_level=results.get('confidence_level', 0.95)
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to get A/B test results: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get A/B test results: {str(e)}")
+
+
+@app.post("/langfuse/dataset/create", response_model=schemas.DatasetResponse, status_code=201)
+def create_evaluation_dataset(
+    request: schemas.DatasetCreateRequest,
+    db: Session = Depends(get_db)
+) -> schemas.DatasetResponse:
+    """
+    Create a new evaluation dataset with test cases.
+    
+    Args:
+        request: Dataset creation request with name and test cases
+        db: Database session
+        
+    Returns:
+        DatasetResponse with dataset details
+        
+    Raises:
+        HTTPException: 400 if dataset already exists
+    """
+    try:
+        from app.langfuse_advanced_service import LangfuseAdvancedService
+        
+        service = LangfuseAdvancedService()
+        dataset_name = service.create_evaluation_dataset(
+            name=request.dataset_name,
+            description=request.description,
+            test_cases=request.test_cases
+        )
+        
+        logger.info(f"Created evaluation dataset '{dataset_name}' with {len(request.test_cases)} test cases")
+        
+        return schemas.DatasetResponse(
+            dataset_name=dataset_name,
+            description=request.description,
+            test_cases_count=len(request.test_cases),
+            created_at=datetime.utcnow()
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to create evaluation dataset: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create dataset: {str(e)}")
+
+
+@app.post("/langfuse/dataset/{dataset_name}/evaluate", response_model=schemas.EvaluationResults)
+def run_dataset_evaluation(
+    dataset_name: str,
+    variant_id: str,
+    db: Session = Depends(get_db)
+) -> schemas.EvaluationResults:
+    """
+    Run evaluation against a dataset with a specific prompt variant.
+    
+    Args:
+        dataset_name: Name of the evaluation dataset
+        variant_id: ID of the prompt variant to evaluate
+        db: Database session
+        
+    Returns:
+        EvaluationResults with pass/fail metrics
+        
+    Raises:
+        HTTPException: 404 if dataset not found
+    """
+    try:
+        from app.langfuse_advanced_service import LangfuseAdvancedService
+        
+        service = LangfuseAdvancedService()
+        results = service.run_evaluation_dataset(dataset_name, variant_id)
+        
+        logger.info(
+            f"Evaluation complete for dataset '{dataset_name}' with variant '{variant_id}': "
+            f"{results['pass_count']}/{results['total_cases']} passed"
+        )
+        
+        return schemas.EvaluationResults(
+            dataset_name=dataset_name,
+            variant_id=variant_id,
+            total_cases=results['total_cases'],
+            pass_count=results['pass_count'],
+            fail_count=results['fail_count'],
+            pass_rate=results['pass_rate'],
+            avg_latency_ms=results['avg_latency_ms'],
+            avg_tokens=results['avg_tokens']
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to run dataset evaluation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to run evaluation: {str(e)}")
+
+
+@app.get("/langfuse/feedback/summary", response_model=schemas.FeedbackSummary)
+def get_feedback_summary(
+    days: int = 7,
+    variant_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+) -> schemas.FeedbackSummary:
+    """
+    Get aggregated user feedback summary with sentiment analysis.
+    
+    Args:
+        days: Number of days to analyze (default 7)
+        variant_id: Optional filter by prompt variant
+        db: Database session
+        
+    Returns:
+        FeedbackSummary with aggregated metrics
+    """
+    try:
+        from app.langfuse_advanced_service import LangfuseAdvancedService
+        
+        service = LangfuseAdvancedService()
+        summary = service.get_feedback_summary(days=days, variant_id=variant_id)
+        
+        logger.info(
+            f"Feedback summary: {summary['total_feedback']} responses, "
+            f"avg score: {summary['avg_score']:.2f}, "
+            f"satisfaction: {summary['satisfaction_rate']:.1%}"
+        )
+        
+        return schemas.FeedbackSummary(
+            total_feedback=summary['total_feedback'],
+            avg_score=summary['avg_score'],
+            satisfaction_rate=summary['satisfaction_rate'],
+            sentiment_distribution=summary['sentiment_distribution'],
+            period_days=days,
+            variant_id=variant_id
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to get feedback summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get feedback summary: {str(e)}")
+
+
+@app.get("/langfuse/prompts/{prompt_name}/variants", response_model=List[schemas.PromptVariantDetail])
+def get_prompt_variants(
+    prompt_name: str,
+    db: Session = Depends(get_db)
+) -> List[schemas.PromptVariantDetail]:
+    """
+    Get all versions of a prompt with usage statistics.
+    
+    Args:
+        prompt_name: Name of the prompt
+        db: Database session
+        
+    Returns:
+        List of PromptVariantDetail with version info and stats
+    """
+    try:
+        from app.langfuse_advanced_service import LangfuseAdvancedService
+        
+        service = LangfuseAdvancedService()
+        variants = service.get_prompt_variants(prompt_name)
+        
+        logger.info(f"Retrieved {len(variants)} variants for prompt '{prompt_name}'")
+        
+        return [
+            schemas.PromptVariantDetail(
+                variant_id=v['variant_id'],
+                prompt_name=v['prompt_name'],
+                prompt_version=v['version'],
+                is_production=v['is_production'],
+                usage_count=v['usage_count'],
+                avg_latency_ms=v['avg_latency_ms'],
+                avg_tokens=v['avg_tokens'],
+                created_at=v['created_at']
+            ) for v in variants
+        ]
+    
+    except Exception as e:
+        logger.error(f"Failed to get prompt variants: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get prompt variants: {str(e)}")
+
+
         raise HTTPException(status_code=500, detail=f"Failed to add message: {str(e)}")

@@ -61,6 +61,7 @@ scripts/
 *.bak
 *.backup
 COMMIT_*.txt
+tmp/
 
 # Test data (generated files, should not be in repo)
 .pytest_cache/

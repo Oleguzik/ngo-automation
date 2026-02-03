@@ -1977,3 +1977,291 @@ def delete_conversation(db: Session, conversation_id) -> bool:
     return True
 
 
+# ============================================================================
+# PHASE 5C: Agent Orchestration CRUD Operations
+# ============================================================================
+
+def get_agent_task(db: Session, task_id: UUID) -> Optional[models.AgentTask]:
+    """
+    Get agent task by ID.
+    
+    Args:
+        db: Database session
+        task_id: Task UUID
+        
+    Returns:
+        AgentTask instance or None if not found
+        
+    Example:
+        >>> task = get_agent_task(db, task_id)
+        >>> task.status
+        'completed'
+    """
+    return db.query(models.AgentTask).filter(
+        models.AgentTask.id == task_id
+    ).first()
+
+
+def get_agent_task_with_steps(db: Session, task_id: UUID) -> Optional[models.AgentTask]:
+    """
+    Get agent task with all steps eagerly loaded.
+    
+    Args:
+        db: Database session
+        task_id: Task UUID
+        
+    Returns:
+        AgentTask with steps relationship loaded
+        
+    Example:
+        >>> task = get_agent_task_with_steps(db, task_id)
+        >>> len(task.steps)
+        5
+    """
+    from sqlalchemy.orm import joinedload
+    
+    return db.query(models.AgentTask).options(
+        joinedload(models.AgentTask.steps)
+    ).filter(
+        models.AgentTask.id == task_id
+    ).first()
+
+
+def list_agent_tasks(
+    db: Session,
+    organization_id: int,
+    status: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0
+) -> List[models.AgentTask]:
+    """
+    List agent tasks for organization with optional status filter.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        status: Optional status filter (pending, executing, completed, failed)
+        limit: Maximum results to return
+        offset: Number of results to skip
+        
+    Returns:
+        List of AgentTask instances
+        
+    Example:
+        >>> tasks = list_agent_tasks(db, org_id=1, status='completed', limit=10)
+        >>> len(tasks)
+        10
+    """
+    query = db.query(models.AgentTask).filter(
+        models.AgentTask.organization_id == organization_id
+    )
+    
+    if status:
+        query = query.filter(models.AgentTask.status == status)
+    
+    return query.order_by(
+        models.AgentTask.created_at.desc()
+    ).limit(limit).offset(offset).all()
+
+
+def count_agent_tasks(
+    db: Session,
+    organization_id: int,
+    status: Optional[str] = None
+) -> int:
+    """
+    Count agent tasks for organization with optional status filter.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        status: Optional status filter
+        
+    Returns:
+        Count of matching tasks
+    """
+    query = db.query(models.AgentTask).filter(
+        models.AgentTask.organization_id == organization_id
+    )
+    
+    if status:
+        query = query.filter(models.AgentTask.status == status)
+    
+    return query.count()
+
+
+def create_agent_step(
+    db: Session,
+    task_id: UUID,
+    step_number: int,
+    step_name: str,
+    action: str,
+    input_data: dict
+) -> models.AgentStep:
+    """
+    Create new agent step.
+    
+    Args:
+        db: Database session
+        task_id: Parent task UUID
+        step_number: Step number (1-indexed)
+        step_name: Human-readable step name
+        action: Tool action name
+        input_data: Tool input parameters
+        
+    Returns:
+        Created AgentStep instance
+        
+    Example:
+        >>> step = create_agent_step(
+        ...     db, task_id, 1, "Fetch transactions", "fetch_transactions",
+        ...     {"date_from": "2025-10-01", "date_to": "2025-12-31"}
+        ... )
+    """
+    step = models.AgentStep(
+        task_id=task_id,
+        step_number=step_number,
+        step_name=step_name,
+        action=action,
+        input_data=input_data,
+        status="pending"
+    )
+    
+    db.add(step)
+    db.commit()
+    db.refresh(step)
+    
+    return step
+
+
+def update_agent_step_status(
+    db: Session,
+    step_id: UUID,
+    status: str,
+    output_data: Optional[dict] = None,
+    error_message: Optional[str] = None
+) -> models.AgentStep:
+    """
+    Update agent step status and results.
+    
+    Args:
+        db: Database session
+        step_id: Step UUID
+        status: New status (running, completed, error)
+        output_data: Tool output (if completed)
+        error_message: Error message (if failed)
+        
+    Returns:
+        Updated AgentStep instance
+        
+    Raises:
+        HTTPException 404: If step not found
+    """
+    step = db.query(models.AgentStep).filter(
+        models.AgentStep.id == step_id
+    ).first()
+    
+    if not step:
+        raise HTTPException(status_code=404, detail="Agent step not found")
+    
+    step.status = status
+    
+    if output_data:
+        step.output_data = output_data
+    
+    if error_message:
+        step.error_message = error_message
+    
+    if status == "completed" or status == "error":
+        step.completed_at = datetime.utcnow()
+        if step.started_at:
+            duration = (step.completed_at - step.started_at).total_seconds()
+            step.duration_seconds = duration
+    
+    db.commit()
+    db.refresh(step)
+    
+    return step
+
+
+def delete_agent_task(db: Session, task_id: UUID) -> bool:
+    """
+    Delete agent task (cascades to steps).
+    
+    Args:
+        db: Database session
+        task_id: Task UUID
+        
+    Returns:
+        True if deleted, False if not found
+        
+    Example:
+        >>> deleted = delete_agent_task(db, task_id)
+        >>> deleted
+        True
+    """
+    task = db.query(models.AgentTask).filter(
+        models.AgentTask.id == task_id
+    ).first()
+    
+    if not task:
+        return False
+    
+    db.delete(task)
+    db.commit()
+    
+    logger.info(f"Deleted agent task {task_id} with all steps")
+    
+    return True
+
+
+def get_agent_task_cost_summary(db: Session, organization_id: int) -> dict:
+    """
+    Get cost summary for all agent tasks by organization.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        
+    Returns:
+        {
+            "total_tasks": 10,
+            "total_cost_usd": 2.45,
+            "total_tokens": 150000,
+            "avg_cost_per_task": 0.245,
+            "completed_tasks": 8,
+            "failed_tasks": 2
+        }
+    """
+    from sqlalchemy import func
+    
+    stats = db.query(
+        func.count(models.AgentTask.id).label("total_tasks"),
+        func.sum(models.AgentTask.total_cost_usd).label("total_cost"),
+        func.sum(models.AgentTask.total_tokens_used).label("total_tokens"),
+        func.count(
+            models.AgentTask.id
+        ).filter(models.AgentTask.status == "completed").label("completed"),
+        func.count(
+            models.AgentTask.id
+        ).filter(models.AgentTask.status == "failed").label("failed")
+    ).filter(
+        models.AgentTask.organization_id == organization_id
+    ).first()
+    
+    total_tasks = stats.total_tasks or 0
+    total_cost = float(stats.total_cost or 0.0)
+    total_tokens = stats.total_tokens or 0
+    completed = stats.completed or 0
+    failed = stats.failed or 0
+    
+    return {
+        "total_tasks": total_tasks,
+        "total_cost_usd": round(total_cost, 4),
+        "total_tokens": total_tokens,
+        "avg_cost_per_task": round(total_cost / total_tasks, 4) if total_tasks > 0 else 0.0,
+        "completed_tasks": completed,
+        "failed_tasks": failed
+    }
+
+

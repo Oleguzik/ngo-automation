@@ -1473,3 +1473,648 @@ class FinancialSummaryResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+# ============================================================================
+# PHASE 5C: Langfuse Evaluation & Prompt Experimentation Schemas
+# ============================================================================
+
+class JudgeResult(BaseModel):
+    """
+    Structured LLM-as-a-Judge output for evaluating routing and RAG quality.
+    
+    Used with OpenAI Structured Outputs to guarantee valid JSON responses.
+    Reference: https://platform.openai.com/docs/guides/structured-outputs
+    """
+    score: int = Field(
+        description="Binary score: 1 (correct/good) or 0 (incorrect/poor)",
+        ge=0,
+        le=1
+    )
+    reasoning: str = Field(
+        description="Explanation of score with specific evidence",
+        min_length=10
+    )
+
+
+class PromptExperiment(BaseModel):
+    """
+    Schema for tracking prompt experiment metadata.
+    
+    Used in Langfuse traces to compare different prompt variants.
+    """
+    # Prompt Information
+    prompt_name: str = Field(description="Prompt version identifier (e.g., 'v2_detailed')")
+    prompt_text: str = Field(description="Full prompt content")
+    prompt_variables: dict = Field(description="Variables used: {query: str, context: str}")
+    
+    # Model Configuration
+    model: str = Field(description="Model name: 'gpt-4o-mini' | 'gpt-4o'")
+    temperature: float = Field(description="Sampling temperature 0.0 - 1.0", ge=0.0, le=1.0)
+    max_tokens: int = Field(description="Maximum response tokens", gt=0)
+    
+    # Execution Metadata
+    experiment_id: str = Field(description="Unique experiment ID (Langfuse trace ID)")
+    timestamp: datetime = Field(description="Experiment execution time")
+    environment: Literal["dev", "staging", "production"] = Field(
+        description="Deployment environment"
+    )
+
+
+class TokenMetrics(BaseModel):
+    """
+    Token usage and cost tracking per request.
+    
+    Automatically captured from OpenAI response.usage object.
+    """
+    input_tokens: int = Field(description="Prompt tokens", ge=0)
+    output_tokens: int = Field(description="Completion tokens", ge=0)
+    total_tokens: int = Field(description="Sum of input + output", ge=0)
+    
+    # Cost Breakdown (USD)
+    input_cost: float = Field(description="input_tokens * model_input_price", ge=0.0)
+    output_cost: float = Field(description="output_tokens * model_output_price", ge=0.0)
+    total_cost: float = Field(description="Sum of input_cost + output_cost", ge=0.0)
+    
+    # Cached Tokens (OpenAI prompt caching)
+    cached_tokens: int = Field(default=0, description="Cached input tokens (50% discount)", ge=0)
+    cache_savings: float = Field(default=0.0, description="Cost saved from caching (USD)", ge=0.0)
+
+
+class LatencyMetrics(BaseModel):
+    """
+    Performance timing measurements for request lifecycle.
+    """
+    # Total Response Time
+    total_latency_ms: float = Field(description="End-to-end request time (ms)", ge=0.0)
+    
+    # Breakdown (optional)
+    embedding_time_ms: float = Field(default=0.0, description="Query embedding time", ge=0.0)
+    vector_search_ms: float = Field(default=0.0, description="pgvector search time", ge=0.0)
+    llm_call_ms: float = Field(default=0.0, description="OpenAI API call time", ge=0.0)
+    post_processing_ms: float = Field(default=0.0, description="Response parsing time", ge=0.0)
+    
+    # Network Stats
+    time_to_first_token_ms: float = Field(
+        default=0.0,
+        description="Streaming latency (first token)",
+        ge=0.0
+    )
+    tokens_per_second: float = Field(
+        default=0.0,
+        description="Generation speed (tokens/sec)",
+        ge=0.0
+    )
+
+
+class QualityScores(BaseModel):
+    """
+    LLM-as-a-Judge evaluation results for routing and RAG quality.
+    
+    Uses GPT-4 to evaluate GPT-4o-mini responses.
+    Reference: LSEG - Judging AI with AI
+    """
+    # Routing Accuracy (Phase 5C specific)
+    routing_correctness: float = Field(
+        description="Did system choose correct tool? (0.0 - 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    reasoning_clarity: float = Field(
+        description="Is routing reasoning logical? (0.0 - 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    
+    # RAG Quality (Phase 5B)
+    faithfulness: float = Field(
+        description="No hallucinations, response matches sources (0.0 - 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    context_relevance: float = Field(
+        description="Are retrieved chunks relevant to query? (0.0 - 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    answer_relevance: float = Field(
+        description="Does answer address the question? (0.0 - 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    
+    # Overall
+    combined_score: float = Field(
+        description="Weighted average of all scores (0.0 - 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    judge_reasoning: str = Field(
+        description="LLM explanation of scores",
+        min_length=10
+    )
+
+
+class RouteEvaluationInput(BaseModel):
+    """
+    Input schema for evaluating routing decisions.
+    
+    Used by EvaluationService to judge if agentic router made correct choice.
+    """
+    query: str = Field(description="Original user query", min_length=1)
+    expected_action: Literal["extract", "query", "hybrid"] = Field(
+        description="Ground truth action for this query"
+    )
+    actual_action: Literal["extract", "query", "hybrid"] = Field(
+        description="Action chosen by routing system"
+    )
+    reasoning: str = Field(description="Router's explanation for choice", min_length=1)
+    context: str = Field(description="Available context during routing decision")
+
+
+class ExperimentResult(BaseModel):
+    """
+    Complete result for a single prompt experiment execution.
+    
+    Combines response, metrics, and evaluation scores.
+    """
+    # Experiment Identity
+    prompt_name: str
+    query: str
+    trace_id: str
+    
+    # Response
+    response: str
+    
+    # Metrics
+    tokens: TokenMetrics
+    latency: LatencyMetrics
+    
+    # Evaluation (optional - set after LLM-as-a-Judge runs)
+    quality_scores: Optional[QualityScores] = None
+    
+    # Metadata
+    timestamp: datetime
+    model: str
+    environment: str
+
+
+class ExperimentSummary(BaseModel):
+    """
+    Aggregated statistics for comparing prompt variants.
+    
+    Generated by PromptExperimentRunner.analyze_results().
+    """
+    prompt_name: str
+    
+    # Token Stats
+    avg_tokens: float = Field(description="Mean total tokens across tests")
+    min_tokens: int = Field(description="Minimum tokens used")
+    max_tokens: int = Field(description="Maximum tokens used")
+    
+    # Cost Stats
+    avg_cost: float = Field(description="Mean cost per request (USD)")
+    total_cost: float = Field(description="Total cost for all tests (USD)")
+    
+    # Latency Stats
+    avg_latency_ms: float = Field(description="Mean response time (ms)")
+    p95_latency_ms: float = Field(description="95th percentile latency (ms)")
+    
+    # Quality Stats (if evaluations run)
+    avg_routing_correctness: Optional[float] = Field(
+        default=None,
+        description="Mean routing accuracy score (0.0 - 1.0)"
+    )
+    avg_faithfulness: Optional[float] = Field(
+        default=None,
+        description="Mean faithfulness score (0.0 - 1.0)"
+    )
+    
+    # Test Count
+    total_tests: int = Field(description="Number of queries tested")
+    successful_tests: int = Field(description="Tests without errors")
+    failed_tests: int = Field(description="Tests with errors")
+
+
+# ============================================================================
+# PHASE 5C: Agent Orchestration Schemas
+# ============================================================================
+
+class AgentAnalysisRequest(BaseModel):
+    """
+    Request for agent orchestration task.
+    
+    Example:
+        {
+            "objective": "Analyze Q4 2025 spending trends and recommend budget cuts",
+            "context": {
+                "focus_area": "office supplies",
+                "target_reduction": 0.15
+            },
+            "max_steps": 10
+        }
+    """
+    objective: str = Field(
+        ...,
+        min_length=10,
+        max_length=500,
+        description="What you want the agent to analyze",
+        examples=["Analyze Q4 spending trends and recommend budget cuts"]
+    )
+    context: Optional[dict] = Field(
+        default=None,
+        description="Additional context for analysis (date ranges, filters, etc.)"
+    )
+    max_steps: int = Field(
+        default=10,
+        ge=1,
+        le=20,
+        description="Maximum steps allowed (cost control)"
+    )
+
+
+class AgentStepDetail(BaseModel):
+    """Agent step execution details."""
+    step_number: int = Field(description="Step number (1-indexed)")
+    step_name: str = Field(description="Human-readable step name")
+    action: str = Field(description="Tool action (rag_query, fetch_transactions, etc.)")
+    status: str = Field(description="Step status (pending, running, completed, error)")
+    input_data: Optional[dict] = Field(default=None, description="Tool input parameters")
+    output_data: Optional[dict] = Field(default=None, description="Tool output data")
+    error_message: Optional[str] = Field(default=None, description="Error details if failed")
+    tokens_used: int = Field(default=0, description="LLM tokens consumed")
+    cost_usd: float = Field(default=0.0, description="Step cost in USD")
+    duration_seconds: Optional[float] = Field(default=None, description="Execution time")
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentTaskResponse(BaseModel):
+    """
+    Response from agent task execution.
+    
+    Example:
+        {
+            "task_id": "550e8400-e29b-41d4-a716-446655440000",
+            "status": "completed",
+            "plan": [...],
+            "result": {"summary": "...", "step_count": 5},
+            "steps_executed": 5,
+            "total_cost": 0.12,
+            "duration_seconds": 15.3
+        }
+    """
+    task_id: str = Field(description="Task UUID")
+    status: str = Field(description="Task status (pending, planning, executing, completed, failed)")
+    plan: Optional[List[dict]] = Field(default=None, description="Execution plan steps")
+    result: Optional[dict] = Field(default=None, description="Final synthesized result")
+    error_message: Optional[str] = Field(default=None, description="Error details if failed")
+    steps_executed: int = Field(description="Number of steps executed")
+    total_cost: float = Field(description="Total cost in USD")
+    duration_seconds: Optional[float] = Field(default=None, description="Total execution time")
+
+
+class AgentTaskSummary(BaseModel):
+    """
+    Summary of agent task for listing.
+    
+    Example:
+        {
+            "task_id": "550e8400-e29b-41d4-a716-446655440000",
+            "objective": "Analyze Q4 spending trends",
+            "status": "completed",
+            "steps_completed": 5,
+            "total_cost": 0.12,
+            "created_at": "2026-02-02T10:00:00Z",
+            "completed_at": "2026-02-02T10:00:15Z"
+        }
+    """
+    task_id: str = Field(description="Task UUID")
+    objective: str = Field(description="User's analysis goal")
+    status: str = Field(description="Task status")
+    steps_completed: int = Field(description="Number of steps executed")
+    total_cost: float = Field(description="Total cost in USD")
+    created_at: datetime = Field(description="Task creation timestamp")
+    completed_at: Optional[datetime] = Field(default=None, description="Completion timestamp")
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentTaskDetail(BaseModel):
+    """
+    Full agent task details with all steps.
+    
+    Example:
+        {
+            "task_id": "550e8400-e29b-41d4-a716-446655440000",
+            "organization_id": 1,
+            "objective": "Analyze Q4 spending",
+            "status": "completed",
+            "plan": [...],
+            "result": {...},
+            "steps": [...],
+            "total_cost": 0.12,
+            "total_tokens": 15000,
+            "langfuse_trace_url": "https://cloud.langfuse.com/trace/..."
+        }
+    """
+    task_id: str = Field(description="Task UUID")
+    organization_id: int = Field(description="Organization ID")
+    objective: str = Field(description="User's analysis goal")
+    context: Optional[dict] = Field(default=None, description="Additional context")
+    status: str = Field(description="Task status")
+    plan: Optional[List[dict]] = Field(default=None, description="Execution plan")
+    result: Optional[dict] = Field(default=None, description="Final result")
+    error_message: Optional[str] = Field(default=None, description="Error details")
+    steps: List[AgentStepDetail] = Field(description="All execution steps")
+    total_cost: float = Field(description="Total cost in USD")
+    total_tokens: int = Field(description="Total tokens used")
+    created_at: datetime = Field(description="Creation timestamp")
+    started_at: Optional[datetime] = Field(default=None, description="Start timestamp")
+    completed_at: Optional[datetime] = Field(default=None, description="Completion timestamp")
+    langfuse_trace_url: Optional[str] = Field(default=None, description="Link to Langfuse trace")
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentTaskList(BaseModel):
+    """Paginated list of agent tasks."""
+    tasks: List[AgentTaskSummary] = Field(description="List of task summaries")
+    total: int = Field(description="Total count of tasks")
+    limit: int = Field(description="Results per page")
+    offset: int = Field(description="Results skipped")
+
+
+class AgentCostSummary(BaseModel):
+    """
+    Cost summary for agent tasks by organization.
+    
+    Example:
+        {
+            "total_tasks": 10,
+            "total_cost_usd": 2.45,
+            "total_tokens": 150000,
+            "avg_cost_per_task": 0.245,
+            "completed_tasks": 8,
+            "failed_tasks": 2
+        }
+    """
+    total_tasks: int = Field(description="Total number of tasks")
+    total_cost_usd: float = Field(description="Total cost in USD")
+    total_tokens: int = Field(description="Total tokens consumed")
+    avg_cost_per_task: float = Field(description="Average cost per task")
+    completed_tasks: int = Field(description="Successfully completed tasks")
+    failed_tasks: int = Field(description="Failed tasks")
+
+
+# ============================================================================
+# PHASE 5C: Langfuse Advanced Features Schemas
+# ============================================================================
+
+class UserFeedbackRequest(BaseModel):
+    """
+    User feedback for RAG response or agent task.
+    
+    Example:
+        {
+            "trace_id": "langfuse-trace-123",
+            "score": 1,
+            "comment": "Very helpful analysis!"
+        }
+    """
+    trace_id: str = Field(
+        ...,
+        description="Langfuse trace ID",
+        min_length=1
+    )
+    score: int = Field(
+        ...,
+        ge=0,
+        le=1,
+        description="User rating: 0 = thumbs down, 1 = thumbs up"
+    )
+    comment: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional user comment"
+    )
+
+
+class UserFeedbackResponse(BaseModel):
+    """Response after submitting user feedback."""
+    success: bool = Field(description="Whether feedback was recorded")
+    trace_id: str = Field(description="Langfuse trace ID")
+    score: int = Field(description="User rating")
+    message: str = Field(description="Confirmation message")
+
+
+class PromptVariant(BaseModel):
+    """
+    Prompt variant for A/B testing.
+    
+    Example:
+        {
+            "variant_id": "v2_detailed",
+            "name": "Detailed Routing Prompt v2",
+            "prompt_text": "...",
+            "is_active": true,
+            "success_rate": 0.92
+        }
+    """
+    variant_id: str = Field(description="Variant identifier (e.g., v1_basic, v2_detailed)")
+    name: str = Field(description="Human-readable variant name")
+    prompt_text: str = Field(description="Full prompt template")
+    is_active: bool = Field(description="Whether this variant is currently in use")
+    success_rate: Optional[float] = Field(
+        default=None,
+        description="Success rate from A/B testing (0.0-1.0)"
+    )
+    avg_latency_ms: Optional[float] = Field(
+        default=None,
+        description="Average response latency for this variant"
+    )
+    total_uses: int = Field(default=0, description="Number of times used")
+
+
+class ABTestConfig(BaseModel):
+    """
+    A/B test configuration.
+    
+    Example:
+        {
+            "test_name": "routing_prompts_v2_vs_v3",
+            "variant_a": "v2_detailed",
+            "variant_b": "v3_few_shot",
+            "traffic_split": 0.5,
+            "is_active": true
+        }
+    """
+    test_name: str = Field(description="Test identifier")
+    variant_a: str = Field(description="Control variant ID")
+    variant_b: str = Field(description="Experiment variant ID")
+    traffic_split: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of traffic to variant B (0.0-1.0)"
+    )
+    is_active: bool = Field(default=True, description="Whether test is currently running")
+
+
+class ABTestResults(BaseModel):
+    """
+    A/B test results comparison.
+    
+    Example:
+        {
+            "test_name": "routing_prompts_v2_vs_v3",
+            "variant_a_stats": {...},
+            "variant_b_stats": {...},
+            "winner": "variant_b",
+            "confidence": 0.95
+        }
+    """
+    test_name: str = Field(description="Test identifier")
+    variant_a_stats: dict = Field(description="Statistics for variant A")
+    variant_b_stats: dict = Field(description="Statistics for variant B")
+    winner: Optional[str] = Field(
+        default=None,
+        description="Winning variant (if statistically significant)"
+    )
+    confidence: Optional[float] = Field(
+        default=None,
+        description="Statistical confidence (0.0-1.0)"
+    )
+    sample_size_a: int = Field(description="Number of samples for variant A")
+    sample_size_b: int = Field(description="Number of samples for variant B")
+
+
+# ========================================
+# LANGFUSE ADVANCED FEATURES SCHEMAS
+# ========================================
+
+class PromptVariant(BaseModel):
+    """Prompt variant configuration for A/B testing."""
+    variant_id: str = Field(description="Unique variant identifier")
+    prompt_name: str = Field(description="Name of the prompt")
+    prompt_version: int = Field(description="Version number of the prompt")
+    traffic_percentage: float = Field(
+        ge=0.0, le=1.0,
+        description="Fraction of traffic to route to this variant (0.0-1.0)"
+    )
+
+
+class ABTestConfigNew(BaseModel):
+    """
+    A/B test configuration with multiple variants.
+    
+    Supports multi-variant testing beyond simple A/B.
+    """
+    test_name: str = Field(description="Test identifier")
+    variants: List[PromptVariant] = Field(
+        min_length=2,
+        description="List of prompt variants (minimum 2)"
+    )
+
+
+class ABTestResponse(BaseModel):
+    """A/B test creation response."""
+    test_name: str
+    variants: List[PromptVariant]
+    status: str = Field(description="Test status: active, paused, completed")
+    created_at: datetime
+
+
+class ABTestResultsNew(BaseModel):
+    """
+    A/B test results with statistical significance.
+    
+    Includes multi-variant comparison and winner determination.
+    """
+    test_name: str
+    total_observations: int
+    variants: List[dict] = Field(
+        description="Performance stats for each variant"
+    )
+    is_significant: bool = Field(
+        description="Whether results are statistically significant"
+    )
+    winning_variant: Optional[str] = Field(
+        default=None,
+        description="ID of the winning variant (if significant)"
+    )
+    confidence_level: float = Field(
+        default=0.95,
+        description="Statistical confidence level (e.g., 0.95 for 95%)"
+    )
+
+
+class DatasetTestCase(BaseModel):
+    """Single test case for evaluation dataset."""
+    input_data: dict = Field(description="Input parameters for the test")
+    expected_output: dict = Field(description="Expected output/criteria")
+    metadata: Optional[dict] = Field(
+        default=None,
+        description="Additional metadata about the test case"
+    )
+
+
+class DatasetCreateRequest(BaseModel):
+    """Request to create a new evaluation dataset."""
+    dataset_name: str = Field(description="Unique dataset identifier")
+    description: str = Field(description="Purpose/description of the dataset")
+    test_cases: List[DatasetTestCase] = Field(
+        min_length=1,
+        description="List of test cases to include"
+    )
+
+
+class DatasetResponse(BaseModel):
+    """Response after creating a dataset."""
+    dataset_name: str
+    description: str
+    test_cases_count: int
+    created_at: datetime
+
+
+class EvaluationResults(BaseModel):
+    """Results from running evaluation on a dataset."""
+    dataset_name: str
+    variant_id: str
+    total_cases: int
+    pass_count: int
+    fail_count: int
+    pass_rate: float = Field(description="Pass rate (0.0-1.0)")
+    avg_latency_ms: float = Field(description="Average latency in milliseconds")
+    avg_tokens: float = Field(description="Average token usage")
+
+
+class FeedbackSummary(BaseModel):
+    """Aggregated user feedback summary."""
+    total_feedback: int
+    avg_score: float = Field(description="Average feedback score")
+    satisfaction_rate: float = Field(
+        description="Percentage of positive feedback (0.0-1.0)"
+    )
+    sentiment_distribution: dict = Field(
+        description="Distribution of sentiments: positive, neutral, negative"
+    )
+    period_days: int = Field(description="Analysis period in days")
+    variant_id: Optional[str] = Field(
+        default=None,
+        description="Optional variant filter"
+    )
+
+
+class PromptVariantDetail(BaseModel):
+    """Detailed information about a prompt variant."""
+    variant_id: str
+    prompt_name: str
+    prompt_version: int
+    is_production: bool = Field(description="Whether this is the production version")
+    usage_count: int = Field(description="Number of times this variant was used")
+    avg_latency_ms: float
+    avg_tokens: float
+    created_at: datetime
+
+
