@@ -133,7 +133,7 @@ class RAGService:
         db: Session,
         top_k: int = 10,
         temperature: float = RAG_TEMPERATURE,
-        min_similarity: float = 0.7
+        min_similarity: float = 0.5
     ) -> RAGResponse:
         """
         Answer a question using RAG pipeline with semantic caching (async).
@@ -197,7 +197,7 @@ class RAGService:
         db: Session,
         top_k: int = 10,
         temperature: float = RAG_TEMPERATURE,
-        min_similarity: float = 0.7,
+        min_similarity: float = 0.5,
         background_tasks: Optional[BackgroundTasks] = None,
         enable_evaluation: bool = False
     ) -> RAGResponse:
@@ -320,7 +320,7 @@ class RAGService:
         db: Session,
         top_k: int = 10,
         temperature: float = RAG_TEMPERATURE,
-        min_similarity: float = 0.7
+        min_similarity: float = 0.5
     ) -> RAGResponse:
         """
         Execute full RAG pipeline (internal method).

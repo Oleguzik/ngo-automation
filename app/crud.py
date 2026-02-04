@@ -1648,7 +1648,7 @@ def search_similar_chunks(
     query_embedding: List[float],
     organization_id: int,
     top_k: int = 10,
-    min_similarity: float = 0.7
+    min_similarity: float = 0.5
 ) -> List[dict]:
     """
     Search for document chunks similar to query using vector similarity.
@@ -1663,7 +1663,7 @@ def search_similar_chunks(
         query_embedding: Query vector (1536 dimensions from text-embedding-3-small)
         organization_id: Organization ID for filtering
         top_k: Maximum number of chunks to return (default 10, max 50)
-        min_similarity: Minimum cosine similarity threshold (0.0-1.0, default 0.7)
+        min_similarity: Minimum cosine similarity threshold (0.0-1.0, default 0.5)
         
     Returns:
         List of dicts with:
@@ -1692,12 +1692,22 @@ def search_similar_chunks(
     from app.embedding_service import get_embedding_dimensions
     logger = logging.getLogger(__name__)
     
-    # Validate query embedding dimensions (supports both OpenAI 1536 and Ollama 768)
-    expected_dims = get_embedding_dimensions()
-    if len(query_embedding) != expected_dims:
+    # Database schema uses 1536 dimensions (OpenAI standard)
+    # Ollama models produce 768 dimensions - we pad with zeros for compatibility
+    DB_VECTOR_DIMS = 1536
+    native_dims = get_embedding_dimensions()
+    
+    # Pad embedding if it's from Ollama (768 dims) to match database (1536 dims)
+    if len(query_embedding) == native_dims and native_dims < DB_VECTOR_DIMS:
+        padding_size = DB_VECTOR_DIMS - native_dims
+        query_embedding = list(query_embedding) + [0.0] * padding_size
+        logger.debug(f"Padded query embedding from {native_dims} to {DB_VECTOR_DIMS} dimensions")
+    
+    # Validate final dimensions
+    if len(query_embedding) != DB_VECTOR_DIMS:
         raise HTTPException(
             status_code=400,
-            detail=f"Query embedding must be {expected_dims} dimensions, got {len(query_embedding)}"
+            detail=f"Query embedding must be {DB_VECTOR_DIMS} dimensions (or {native_dims} for auto-padding), got {len(query_embedding)}"
         )
     
     # Validate parameters
@@ -1713,18 +1723,19 @@ def search_similar_chunks(
         
         # Raw SQL for vector similarity search
         # Uses <=> operator for cosine distance: 1 - (a <-> b) = cosine_similarity
+        # NOTE: Using CAST() instead of ::vector to avoid SQLAlchemy parameter binding issues
         sql = """
         SELECT 
             dc.id AS chunk_id,
             dc.chunk_text,
             dc.chunk_metadata,
             dp.file_name AS document_name,
-            1 - (dc.embedding <=> :query_vector::vector) AS similarity_score
+            1 - (dc.embedding <=> CAST(:query_vector AS vector)) AS similarity_score
         FROM document_chunks dc
         JOIN document_processing dp ON dc.document_processing_id = dp.id
         WHERE dp.organization_id = :org_id
-          AND 1 - (dc.embedding <=> :query_vector::vector) > :min_similarity
-        ORDER BY dc.embedding <=> :query_vector::vector
+          AND 1 - (dc.embedding <=> CAST(:query_vector AS vector)) > :min_similarity
+        ORDER BY dc.embedding <=> CAST(:query_vector AS vector)
         LIMIT :top_k
         """
         

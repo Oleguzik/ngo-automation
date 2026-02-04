@@ -33,6 +33,52 @@ class AIService:
             self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
             self.model = settings.OPENAI_MODEL
     
+    def chat(
+        self,
+        messages: list,
+        system: str = None,
+        temperature: float = 0.1,
+        max_tokens: int = 1000
+    ) -> Dict[str, Any]:
+        """
+        General chat completion for RAG and other use cases.
+        
+        Args:
+            messages: List of message dicts with role and content
+            system: System prompt (if not in messages)
+            temperature: LLM temperature (0.0-1.0)
+            max_tokens: Maximum tokens in response
+            
+        Returns:
+            Dict with 'content' key containing the response text
+            
+        Raises:
+            ValueError: If OpenAI client not configured
+        """
+        if not self.client:
+            raise ValueError("OpenAI API key not configured")
+        
+        # Build messages list
+        all_messages = []
+        if system:
+            all_messages.append({"role": "system", "content": system})
+        all_messages.extend(messages)
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=all_messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            content = response.choices[0].message.content
+            return {"content": content}
+            
+        except Exception as e:
+            logger.error(f"Chat completion failed: {str(e)}")
+            raise ValueError(f"Chat completion failed: {str(e)}")
+    
     def _extract_from_structured_data(self, text: str, analysis_type: str = "cost") -> Optional[Dict[str, Any]]:
         """
         Parse structured table data (spreadsheets, CSV) directly before AI processing.

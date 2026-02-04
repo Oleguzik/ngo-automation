@@ -683,14 +683,14 @@ class SearchChunkResult(BaseModel):
     
     Example:
         {
-            "chunk_id": "uuid-1",
+            "chunk_id": 1,
             "chunk_text": "Invoice from Tech Solutions...",
             "similarity_score": 0.95,
             "document_name": "invoice_2025-12-15.pdf",
             "metadata": {"page": 1}
         }
     """
-    chunk_id: UUID = Field(..., description="Unique chunk identifier")
+    chunk_id: int = Field(..., description="Unique chunk identifier")
     chunk_text: str = Field(..., min_length=1, description="Chunk text content")
     similarity_score: float = Field(..., ge=0.0, le=1.0, description="Cosine similarity (0-1)")
     document_name: str = Field(..., description="Source document filename")
@@ -713,12 +713,12 @@ class SearchRequest(BaseModel):
         {
             "query": "tech expenses Q4",
             "top_k": 5,
-            "min_similarity": 0.7
+            "min_similarity": 0.5
         }
     """
     query: str = Field(..., min_length=1, max_length=1000, description="Search query")
     top_k: int = Field(default=5, ge=1, le=20, description="Max results")
-    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0, description="Min similarity score")
+    min_similarity: float = Field(default=0.5, ge=0.0, le=1.0, description="Min similarity score")
 
 
 class SearchResponse(BaseModel):
@@ -782,13 +782,13 @@ class RAGRequest(BaseModel):
         {
             "question": "How much did we spend on consulting in Q4?",
             "top_k": 10,
-            "min_similarity": 0.7,
+            "min_similarity": 0.5,
             "temperature": 0.1
         }
     """
     question: str = Field(..., min_length=1, max_length=1000, description="Natural language question")
     top_k: int = Field(default=10, ge=1, le=50, description="Chunks to retrieve")
-    min_similarity: float = Field(default=0.7, ge=0.0, le=1.0, description="Similarity threshold")
+    min_similarity: float = Field(default=0.5, ge=0.0, le=1.0, description="Similarity threshold")
     temperature: float = Field(default=0.1, ge=0.0, le=1.0, description="LLM temperature")
 
 
