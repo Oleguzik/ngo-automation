@@ -53,7 +53,7 @@ This project is a **complete 5-phase backend implementation** for an NGO financi
 
 ### Document Processing (Phase 3)
 - ✅ PDF extraction with OCR (PyPDF2 + pytesseract)
-- ✅ AI-powered field extraction (GPT-4o-mini, structured outputs)
+- ✅ AI-powered field extraction (GPT-4.1-mini, structured outputs)
 - ✅ Bank statement parsing (transaction recognition)
 - ✅ Invoice processing (invoice details extraction)
 - ✅ Automated categorization and validation
@@ -84,7 +84,7 @@ This project is a **complete 5-phase backend implementation** for an NGO financi
 | **ORM** | SQLAlchemy 2.x | Object-relational mapping |
 | **Validation** | Pydantic 2.5+ | Request/response schemas |
 | **Document Processing** | PyPDF2, pytesseract, pdf2image | PDF extraction & OCR |
-| **AI/ML** | OpenAI API (GPT-4o-mini, embeddings) | Extraction, LLM, embeddings |
+| **AI/ML** | OpenAI API (GPT-4.1-mini, embeddings) | Extraction, LLM, embeddings |
 | **Migrations** | Alembic | Version-controlled schema evolution |
 | **Deployment** | Docker Compose | Local dev + production ready |
 | **Testing** | Pytest 7.4+ | Unit, integration, performance tests |
@@ -115,7 +115,7 @@ graph TB
     
     Cache["⚡ Cache & Index<br/>IVFFlat Vectors<br/>(10-20K docs)"]
     
-    AI["🧠 AI Services<br/>OpenAI GPT-4o-mini<br/>Embeddings 1536-dim"]
+    AI["🧠 AI Services<br/>OpenAI GPT-4.1-mini<br/>Embeddings 1536-dim"]
     
     Client -->|REST| LB
     

@@ -513,7 +513,7 @@ class Transaction(Base):
     
     PHASE 4: AI-powered multi-source transaction processing
     - OCR extraction from receipt photos (Tesseract)
-    - AI-powered text parsing (OpenAI GPT-4o-mini)
+    - AI-powered text parsing (OpenAI GPT-4.1-mini)
     - Bank statement parsing (rule-based)
     - Invoice processing with line items
     - Hash-based deduplication (SHA-256)

@@ -1509,7 +1509,7 @@ class PromptExperiment(BaseModel):
     prompt_variables: dict = Field(description="Variables used: {query: str, context: str}")
     
     # Model Configuration
-    model: str = Field(description="Model name: 'gpt-4o-mini' | 'gpt-4o'")
+    model: str = Field(description="Model name: 'gpt-4.1-mini' | 'gpt-4'")
     temperature: float = Field(description="Sampling temperature 0.0 - 1.0", ge=0.0, le=1.0)
     max_tokens: int = Field(description="Maximum response tokens", gt=0)
     
@@ -1571,7 +1571,7 @@ class QualityScores(BaseModel):
     """
     LLM-as-a-Judge evaluation results for routing and RAG quality.
     
-    Uses GPT-4 to evaluate GPT-4o-mini responses.
+    Uses GPT-4 to evaluate GPT-4.1-mini responses.
     Reference: LSEG - Judging AI with AI
     """
     # Routing Accuracy (Phase 5C specific)

@@ -16,7 +16,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from langfuse import Langfuse
-from langfuse.decorators import langfuse_context
+from langfuse import Langfuse
 import logging
 
 logger = logging.getLogger(__name__)

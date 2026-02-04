@@ -73,3 +73,6 @@ test_*.py
 documents_export.csv
 *.csv
 *.sh
+
+# Generated Excel reports
+test_results/excel_reports/*.xlsx

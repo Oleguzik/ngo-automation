@@ -36,7 +36,7 @@ try:
     from langfuse import Langfuse, get_client, propagate_attributes
     # Try importing langfuse_context for proper tags support
     try:
-        from langfuse.decorators import langfuse_context
+        from langfuse import Langfuse
         LANGFUSE_CONTEXT_AVAILABLE = True
     except (ImportError, AttributeError):
         langfuse_context = None

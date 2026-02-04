@@ -4,7 +4,7 @@ RAG (Retrieval-Augmented Generation) Service for Phase 5B + Phase 5C Langfuse In
 Provides semantic search over document chunks and AI-powered Q&A using:
 - Vector similarity search (pgvector)
 - OpenAI embeddings (text-embedding-3-small)
-- GPT-4o-mini for answer generation
+- GPT-4.1-mini for answer generation
 - Prompt engineering for factual, citation-rich responses
 
 Phase 5C Additions:
@@ -17,7 +17,7 @@ Architecture:
     1. Embed user question
     2. Search similar chunks using vector similarity
     3. Construct prompt with system instructions + context
-    4. Generate answer using GPT-4o-mini
+    4. Generate answer using GPT-4.1-mini
     5. Extract citations and calculate confidence score
     6. Schedule background evaluation (faithfulness check)
 """
@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 # Langfuse imports
 try:
-    from langfuse.decorators import observe, langfuse_context
+    from langfuse import observe
     from langfuse import Langfuse
     LANGFUSE_AVAILABLE = True
 except ImportError:
@@ -44,7 +44,7 @@ except ImportError:
 
 from app.ai_service import AIService
 from app.crud import search_similar_chunks
-from app.embedding_service import EmbeddingService
+from app.embedding_service import get_embedding_service
 from app.models import DocumentChunk, DocumentProcessing
 from app.schemas import SourceCitation, RAGResponse
 from app.semantic_cache import get_semantic_cache
@@ -102,7 +102,7 @@ class RAGService:
         4. Embed query → 1536-dimensional vector
         5. Vector search → Retrieve top-K similar chunks
         6. Construct prompt → System instructions + chunks + question
-        7. Generate answer → GPT-4o-mini with low temperature
+        7. Generate answer → GPT-4.1-mini with low temperature
         8. Parse citations → Extract source information
         9. Calculate confidence → Aggregate chunk similarities
         10. Cache result for future similar queries
@@ -121,7 +121,7 @@ class RAGService:
         Args:
             use_cache: Enable semantic caching (default True)
         """
-        self.embedding_service = EmbeddingService()
+        self.embedding_service = get_embedding_service()
         self.ai_service = AIService()
         self.use_cache = use_cache
         self.semantic_cache = get_semantic_cache() if use_cache else None
@@ -328,7 +328,7 @@ class RAGService:
         This is the core RAG pipeline that:
         1. Embeds question
         2. Searches for similar chunks
-        3. Generates answer with GPT-4o-mini
+        3. Generates answer with GPT-4.1-mini
         4. Extracts citations and calculates confidence
         
         Called by query() either after cache miss or directly if caching disabled.
@@ -436,14 +436,14 @@ class RAGService:
         
         logger.debug(f"Context constructed: {len(context)} chars from {len(search_results)} chunks")
         
-        # Step 4: Generate answer with GPT-4o-mini
+        # Step 4: Generate answer with GPT-4.1-mini
         try:
             prompt = RAG_SYSTEM_PROMPT.format(
                 context=context,
                 question=question
             )
             
-            logger.debug(f"Calling GPT-4o-mini (temperature={temperature})")
+            logger.debug(f"Calling GPT-4.1-mini (temperature={temperature})")
             response = self.ai_service.chat(
                 messages=[
                     {"role": "system", "content": RAG_SYSTEM_PROMPT[:200] + "..."},  # Truncate for logging

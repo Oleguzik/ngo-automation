@@ -4,7 +4,7 @@ Semantic Cache Service for RAG Query Caching and Cost Optimization.
 Implements LangChain-recommended semantic caching pattern:
 - Cache RAG responses by query similarity
 - If new query is >0.95 similar to cached query → return cached answer
-- Cost: $0 for cache hits vs ~$0.50+ per GPT-4o-mini call
+- Cost: $0 for cache hits vs ~$0.50+ per GPT-4.1-mini call
 - Typical hit rate: 20-40% in financial QA systems
 - Monthly savings: ~35% reduction in API costs
 
@@ -17,7 +17,7 @@ Architecture:
 
 Cost tracking:
     - Cache hit: $0
-    - Cache miss: $0.15-0.50 (embedding + GPT-4o-mini)
+    - Cache miss: $0.15-0.50 (embedding + GPT-4.1-mini)
     - Monthly: €30-50 for 1000+ queries
     
 Reference: LangChain docs on semantic caching patterns
@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from app.schemas import RAGResponse, SourceCitation
-from app.embedding_service import EmbeddingService
+from app.embedding_service import get_embedding_service
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class InMemorySemanticCache:
         # Cache structure: {org_id: [(question_embedding, question_text, response, timestamp)]}
         self._cache: Dict[int, List[tuple]] = {}
         
-        self.embedding_service = EmbeddingService()
+        self.embedding_service = get_embedding_service()
         self.total_hits = 0
         self.total_misses = 0
         

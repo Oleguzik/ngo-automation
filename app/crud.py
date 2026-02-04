@@ -7,9 +7,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 from typing import List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from uuid import UUID
+from io import BytesIO
 from app import models, schemas
+from app.excel_generator import GoBDExcelGenerator
 
 
 # ========== Organization CRUD ==========
@@ -1686,13 +1689,15 @@ def search_similar_chunks(
         >>> assert all(0 <= r['similarity_score'] <= 1 for r in results)
     """
     import logging
+    from app.embedding_service import get_embedding_dimensions
     logger = logging.getLogger(__name__)
     
-    # Validate query embedding dimensions
-    if len(query_embedding) != 1536:
+    # Validate query embedding dimensions (supports both OpenAI 1536 and Ollama 768)
+    expected_dims = get_embedding_dimensions()
+    if len(query_embedding) != expected_dims:
         raise HTTPException(
             status_code=400,
-            detail=f"Query embedding must be 1536 dimensions, got {len(query_embedding)}"
+            detail=f"Query embedding must be {expected_dims} dimensions, got {len(query_embedding)}"
         )
     
     # Validate parameters
@@ -2263,5 +2268,228 @@ def get_agent_task_cost_summary(db: Session, organization_id: int) -> dict:
         "completed_tasks": completed,
         "failed_tasks": failed
     }
+
+
+# ========== Financial Reporting (Phase 4 - Excel Export) ==========
+
+def generate_financial_report_excel(
+    db: Session,
+    organization_id: int,
+    start_date: date,
+    end_date: date,
+    generated_by: Optional[str] = "System"
+) -> Tuple[BytesIO, str]:
+    """
+    Generate GoBD-compliant Excel financial report for organization.
+    
+    This function queries transactions for a specified period, calculates summary
+    metrics (revenue, expenses, VAT totals), and generates a multi-sheet Excel
+    workbook with GoBD-compliant German formatting.
+    
+    Args:
+        db: Database session
+        organization_id: Organization ID
+        start_date: Report start date (inclusive)
+        end_date: Report end date (inclusive)
+        generated_by: Name of user generating report (default: "System")
+        
+    Returns:
+        Tuple of (BytesIO buffer with Excel file, filename)
+        
+    Raises:
+        ValueError: If organization not found or no transactions in period
+        
+    Example:
+        >>> buffer, filename = generate_financial_report_excel(
+        ...     db, org_id=5, 
+        ...     start_date=date(2025,1,1), 
+        ...     end_date=date(2025,12,31)
+        ... )
+        >>> # filename: "Kinderhilfe_Deutschland_eV_2025-01-01_to_2025-12-31_financial_report.xlsx"
+    """
+    from sqlalchemy import and_
+    
+    # 1. Verify organization exists
+    org = db.query(models.Organization).filter(
+        models.Organization.id == organization_id,
+        models.Organization.is_active == True
+    ).first()
+    
+    if not org:
+        raise ValueError(f"Organization {organization_id} not found")
+    
+    # 2. Query transactions for period (GoBD: only active records)
+    transactions = db.query(models.Transaction).filter(
+        and_(
+            models.Transaction.organization_id == organization_id,
+            models.Transaction.transaction_date >= start_date,
+            models.Transaction.transaction_date <= end_date,
+            models.Transaction.is_active == True
+        )
+    ).order_by(models.Transaction.transaction_date.desc()).all()
+    
+    if not transactions:
+        raise ValueError(f"No transactions found for period {start_date} to {end_date}")
+    
+    # 3. Calculate summary metrics
+    total_revenue = sum(
+        tx.amount for tx in transactions if tx.transaction_type == "revenue"
+    ) or Decimal("0.00")
+    
+    total_expenses = sum(
+        tx.amount for tx in transactions if tx.transaction_type == "expense"
+    ) or Decimal("0.00")
+    
+    net_position = total_revenue - total_expenses
+    
+    # Calculate VAT totals by rate
+    vat_19 = sum(
+        tx.vat_amount for tx in transactions 
+        if tx.vat_rate == Decimal("0.19") and tx.vat_amount
+    ) or Decimal("0.00")
+    
+    vat_7 = sum(
+        tx.vat_amount for tx in transactions 
+        if tx.vat_rate == Decimal("0.07") and tx.vat_amount
+    ) or Decimal("0.00")
+    
+    vat_0 = sum(
+        tx.vat_amount for tx in transactions 
+        if tx.vat_rate == Decimal("0.00") and tx.vat_amount
+    ) or Decimal("0.00")
+    
+    duplicate_count = sum(1 for tx in transactions if tx.is_duplicate)
+    
+    # 4. Initialize Excel generator
+    generator = GoBDExcelGenerator(
+        organization_name=org.name,
+        report_title=f"Financial Report {start_date.isoformat()} to {end_date.isoformat()}",
+        generated_by=generated_by
+    )
+    
+    wb = generator.get_workbook()
+    
+    # 5. Build Summary sheet
+    summary_sheet = wb.create_sheet("Summary", 0)
+    summary_headers = [
+        "Organization", "Report Period", "Total Revenue (EUR)", 
+        "Total Expenses (EUR)", "Net Position (EUR)", "VAT 19% (EUR)", 
+        "VAT 7% (EUR)", "VAT 0% (EUR)", "Duplicate Count", "Generated At"
+    ]
+    
+    summary_sheet.append(summary_headers)
+    summary_sheet.append([
+        org.name,
+        f"{start_date.isoformat()} to {end_date.isoformat()}",
+        float(total_revenue),
+        float(total_expenses),
+        float(net_position),
+        float(vat_19),
+        float(vat_7),
+        float(vat_0),
+        duplicate_count,
+        datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    ])
+    
+    # Apply header style to Summary sheet
+    for cell in summary_sheet[1]:
+        cell.style = "header"
+    
+    # Apply currency formatting to monetary columns (columns C-H)
+    for col_idx in [3, 4, 5, 6, 7, 8]:  # Revenue, Expenses, Net, VAT columns
+        summary_sheet.cell(row=2, column=col_idx).style = "currency_eur"
+    
+    # Auto-adjust column widths for Summary
+    for col in summary_sheet.columns:
+        max_length = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)
+        summary_sheet.column_dimensions[col_letter].width = adjusted_width
+    
+    # 6. Build Transactions sheet
+    tx_sheet = wb.create_sheet("Transactions", 1)
+    tx_headers = [
+        "Date", "Vendor", "Amount (EUR)", "VAT Rate", "VAT Amount (EUR)", 
+        "Net Amount (EUR)", "Category", "Type", "Payment Method", "Source", 
+        "Project", "Notes", "Transaction Hash"
+    ]
+    
+    tx_sheet.append(tx_headers)
+    
+    # Populate transaction rows
+    for tx in transactions:
+        # Get project name if exists
+        project_name = ""
+        if tx.project_id:
+            project = db.query(models.Project).filter(
+                models.Project.id == tx.project_id
+            ).first()
+            if project:
+                project_name = project.name
+        
+        tx_sheet.append([
+            tx.transaction_date,
+            tx.vendor_name or "",
+            float(tx.amount) if tx.amount else 0.00,
+            float(tx.vat_rate) if tx.vat_rate else 0.00,
+            float(tx.vat_amount) if tx.vat_amount else 0.00,
+            float(tx.net_amount) if tx.net_amount else 0.00,
+            tx.category or "",
+            tx.transaction_type,
+            tx.payment_method or "",
+            tx.source_type,
+            project_name,
+            tx.notes or "",
+            tx.transaction_hash
+        ])
+    
+    # Apply styles to Transactions sheet
+    for cell in tx_sheet[1]:
+        cell.style = "header"
+    
+    # Format date and currency columns for all data rows
+    for row in tx_sheet.iter_rows(min_row=2, max_row=tx_sheet.max_row):
+        row[0].style = "date_de"  # Date column (A)
+        row[2].style = "currency_eur"  # Amount column (C)
+        row[4].style = "currency_eur"  # VAT Amount column (E)
+        row[5].style = "currency_eur"  # Net Amount column (F)
+    
+    # Auto-adjust column widths for Transactions
+    for col in tx_sheet.columns:
+        max_length = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)
+        tx_sheet.column_dimensions[col_letter].width = adjusted_width
+    
+    # 7. Remove default "Init" sheet
+    if "Init" in wb.sheetnames:
+        wb.remove(wb["Init"])
+    
+    # 8. Save to BytesIO buffer
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    # 9. Generate filename
+    filename = generator.build_filename(
+        organization_name=org.name,
+        start=start_date,
+        end=end_date,
+        suffix="financial_report"
+    )
+    
+    return output, filename
 
 

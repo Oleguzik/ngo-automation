@@ -10,7 +10,7 @@ Workflow:
 3. SYNTHESIZE: Combine step outputs into coherent final result
 
 Key Features:
-- Planning with GPT-4o-mini (structured JSON output)
+- Planning with GPT-4.1-mini (structured JSON output)
 - Sequential step execution with state tracking
 - Tool dispatch (RAG query, data fetch, calculations, analysis)
 - Cost tracking per task/step
@@ -28,7 +28,7 @@ import json
 from datetime import datetime
 from decimal import Decimal
 from sqlalchemy.orm import Session
-from langfuse.decorators import langfuse_context, observe
+from langfuse import observe
 
 from app import models, crud, schemas
 from app.ai_service import AIService
@@ -37,6 +37,15 @@ from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Helper functions for langfuse context (graceful degradation)
+def update_langfuse_trace(tags: List[str] = None, metadata: Dict = None):
+    """Update current langfuse trace if available - no-op in langfuse 3.x"""
+    pass
+
+def get_langfuse_trace_id() -> Optional[str]:
+    """Get current langfuse trace ID - handled by @observe decorator in langfuse 3.x"""
+    return None
 
 
 class OrchestrationService:
@@ -117,7 +126,7 @@ class OrchestrationService:
             logger.info(f"Task {task.id}: Plan generated with {len(plan)} steps")
             
             # Update Langfuse trace
-            langfuse_context.update_current_trace(
+            update_langfuse_trace(
                 tags=["agent_orchestration", f"org:{organization_id}", "phase:planning"],
                 metadata={
                     "objective": objective,
@@ -171,7 +180,7 @@ class OrchestrationService:
             logger.info(f"Task {task.id}: Completed in {duration:.2f}s, cost: ${float(task.total_cost_usd):.4f}")
             
             # 6. Update Langfuse trace
-            langfuse_context.update_current_trace(
+            update_langfuse_trace(
                 tags=["completed"],
                 metadata={
                     "status": "completed",
@@ -199,7 +208,7 @@ class OrchestrationService:
             task.completed_at = datetime.utcnow()
             db.commit()
             
-            langfuse_context.update_current_trace(
+            update_langfuse_trace(
                 tags=["error", "failed"],
                 metadata={"error": str(e), "task_id": str(task.id)}
             )
@@ -215,7 +224,7 @@ class OrchestrationService:
         """
         Generate step-by-step execution plan using LLM.
         
-        Uses GPT-4o-mini with structured output to ensure plan quality.
+        Uses GPT-4.1-mini with structured output to ensure plan quality.
         
         Args:
             objective: User's analysis goal
@@ -279,7 +288,7 @@ Create a plan with maximum {max_steps} steps to achieve this objective."""
         
         # Call LLM with structured output
         response = self.ai_service.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -488,7 +497,7 @@ Synthesize these findings into a comprehensive financial analysis report."""
         logger.info("Synthesizing results with LLM")
         
         response = self.ai_service.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -635,7 +644,7 @@ Synthesize these findings into a comprehensive financial analysis report."""
         """
         Analyze trends using LLM.
         
-        Uses GPT-4o-mini to identify patterns, anomalies, and trends
+        Uses GPT-4.1-mini to identify patterns, anomalies, and trends
         in financial data.
         """
         # Extract data summary from previous results
@@ -656,14 +665,14 @@ Be concise and data-driven. Use bullet points."""
         logger.info("Analyzing trends with LLM")
         
         response = self.ai_service.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3
         )
         
         analysis = response.choices[0].message.content
         tokens = response.usage.total_tokens
-        cost = tokens * 0.00015 / 1000  # GPT-4o-mini pricing: $0.150 per 1M tokens
+        cost = tokens * 0.00020 / 1000  # GPT-4.1-mini pricing: $0.200 per 1M tokens
         
         return {
             "analysis": analysis,
@@ -697,7 +706,7 @@ Be specific and actionable."""
         logger.info("Generating recommendations with LLM")
         
         response = self.ai_service.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4  # Slightly higher for creative recommendations
         )
@@ -744,7 +753,7 @@ Be specific and actionable."""
             context=context or {},
             max_steps=max_steps,
             status="pending",
-            langfuse_trace_id=langfuse_context.get_current_trace_id()
+            langfuse_trace_id=get_langfuse_trace_id()
         )
         db.add(task)
         db.commit()

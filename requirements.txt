@@ -18,6 +18,9 @@ tenacity>=8.2.0
 # Langfuse - Observability & Prompt Experimentation (Phase 5C)
 langfuse>=2.0.0
 
+# Ollama - Local LLM & Embeddings (Phase 5D)
+requests>=2.31.0  # For Ollama HTTP API calls
+
 # Document Processing - XLSX, CSV, Images (Phase 3 MVP Extension)
 openpyxl>=3.1.0
 pandas>=2.0.0

@@ -5,9 +5,10 @@ Provides CRUD operations for Organizations and Projects.
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Header, Path, Body, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from datetime import date
 from uuid import UUID
 import logging
 
@@ -16,6 +17,7 @@ from app.database import engine, get_db, Base
 from app.pdf_utils import extract_text_from_pdf
 from app.document_utils import extract_text_from_file, get_supported_file_types
 from app.ai_service import AIService
+from app.embedding_service import get_embedding_service  # Phase 5D: Ollama integration
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -811,7 +813,7 @@ async def upload_pdf_with_ai_extraction(
     **Workflow:**
     1. Upload document file (any supported format)
     2. Extract text (format-specific: PDF→PyPDF2, XLSX→openpyxl, CSV→pandas, IMG→OCR)
-    3. Analyze with OpenAI GPT-4o-mini (extract cost or profit data)
+    3. Analyze with OpenAI GPT-4.1-mini (extract cost or profit data)
     4. Store raw text and structured data in database
     5. [Optional Phase 5] Chunk, embed, and store for RAG if enable_rag=True
     
@@ -975,7 +977,7 @@ async def upload_pdf_with_ai_extraction(
         if enable_rag:
             try:
                 from app.chunking_service import ChunkingService
-                from app.embedding_service import EmbeddingService
+                from app.embedding_service import get_embedding_service
                 
                 logger.info(f"Starting RAG processing for document {doc.id}")
                 
@@ -991,7 +993,7 @@ async def upload_pdf_with_ai_extraction(
                 logger.info(f"Created {len(chunks)} chunks for document {doc.id}")
                 
                 # Generate embeddings and save chunks
-                embedding_service = EmbeddingService()
+                embedding_service = get_embedding_service()
                 saved_chunks = crud.create_document_chunks(
                     db=db,
                     document_processing_id=doc.id,
@@ -1497,6 +1499,117 @@ def get_transaction_convenience(
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return tx
+
+
+# ========== Financial Reporting (Phase 4 - Excel Export) ==========
+
+@app.get(
+    "/organizations/{organization_id}/reports/financial-excel",
+    response_class=StreamingResponse,
+    tags=["Phase 4 - Financial Reporting"]
+)
+def export_financial_report_excel(
+    organization_id: int = Path(..., gt=0, description="Organization ID"),
+    start_date: date = Query(..., description="Report start date (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="Report end date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate and download GoBD-compliant Excel financial report.
+    
+    **Phase 4 Feature:** Excel export with multi-sheet workbook (Summary, Transactions)
+    
+    **GoBD Compliance:**
+    - Immutable transaction records (soft delete only, is_active=True)
+    - German date/number formatting (DD.MM.YYYY, comma as decimal separator)
+    - Euro currency format (#,##0.00 €)
+    - VAT breakdown by rate (19%, 7%, 0%)
+    - Audit trail (transaction_hash, created_at, updated_at)
+    - Deterministic filename for traceability
+    
+    **Workflow:**
+    1. Validate organization exists and is active
+    2. Query transactions for date range (only is_active=True)
+    3. Calculate summary metrics (total revenue, total expenses, net position, VAT totals)
+    4. Generate Excel workbook with openpyxl
+    5. Return as downloadable .xlsx file
+    
+    **Parameters:**
+    - organization_id: Organization ID (must exist and be active)
+    - start_date: Report period start date (inclusive, ISO format YYYY-MM-DD)
+    - end_date: Report period end date (inclusive, ISO format YYYY-MM-DD)
+    
+    **Returns:**
+    - Excel file (.xlsx) with GoBD-compliant financial report
+    - Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    - Filename: `{org_name}_{start_date}_to_{end_date}_financial_report.xlsx`
+    
+    **Excel Structure:**
+    - **Summary Sheet:** Organization metadata, period totals, VAT breakdown
+    - **Transactions Sheet:** All transactions with full details (date, vendor, amounts, VAT, category, etc.)
+    
+    **Example Request:**
+    ```
+    GET /organizations/5/reports/financial-excel?start_date=2025-01-01&end_date=2025-12-31
+    ```
+    
+    **Example Response Headers:**
+    ```
+    Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    Content-Disposition: attachment; filename=Kinderhilfe_Deutschland_eV_2025-01-01_to_2025-12-31_financial_report.xlsx
+    ```
+    
+    **Reference:**
+    - Spec: docs/00-spec-phase4.md - Financial Reporting
+    - Architecture: docs/02-architecture-phase4.md - Excel Generator
+    - Implementation: docs/EXCEL_GENERATOR_READINESS_REPORT.md
+    """
+    try:
+        # Validate date range
+        if start_date > end_date:
+            raise HTTPException(
+                status_code=400,
+                detail=f"start_date ({start_date}) must be before or equal to end_date ({end_date})"
+            )
+        
+        logger.info(
+            f"Generating Excel report for organization {organization_id}, "
+            f"period {start_date} to {end_date}"
+        )
+        
+        # Generate Excel report
+        excel_buffer, filename = crud.generate_financial_report_excel(
+            db=db,
+            organization_id=organization_id,
+            start_date=start_date,
+            end_date=end_date,
+            generated_by="API User"
+        )
+        
+        logger.info(
+            f"Excel report generated successfully: {filename}, "
+            f"size: {excel_buffer.getbuffer().nbytes} bytes"
+        )
+        
+        # Return as downloadable file
+        return StreamingResponse(
+            excel_buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+        
+    except ValueError as e:
+        # Organization not found or no transactions
+        logger.warning(f"Excel generation failed (ValueError): {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Excel generation failed (unexpected error): {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate Excel report: {str(e)}"
+        )
 
 
 # Transaction Duplicate Detection & Resolution
@@ -2291,7 +2404,7 @@ def semantic_document_search(
         logger.info(f"Semantic search: '{request.query[:50]}...' for org {organization_id}")
         
         # Generate embedding for query
-        embedding_service = EmbeddingService()
+        embedding_service = get_embedding_service()
         query_embedding = embedding_service.generate_embedding(request.query)
         logger.debug(f"Query embedding generated: {len(query_embedding)} dimensions")
         
@@ -2348,14 +2461,14 @@ def rag_query_endpoint(
     Ask a natural language question about uploaded financial documents (Phase 5B RAG).
     
     Uses semantic search to retrieve relevant document chunks, constructs a prompt
-    with the retrieved context, and generates a factual answer using GPT-4o-mini.
+    with the retrieved context, and generates a factual answer using GPT-4.1-mini.
     Responses include citations to source documents for transparency.
     
     **RAG Pipeline:**
     1. Embed user question (OpenAI text-embedding-3-small)
     2. Find similar chunks (pgvector cosine similarity search)
     3. Construct prompt (system instructions + context + question)
-    4. Generate answer (GPT-4o-mini, temperature=0.1 for factuality)
+    4. Generate answer (GPT-4.1-mini, temperature=0.1 for factuality)
     5. Parse citations (extract [Source: document, page X] references)
     6. Calculate confidence (average similarity of top chunks)
     
@@ -2421,11 +2534,11 @@ def rag_query_endpoint(
     **Performance:**
     - Embedding: ~150ms (OpenAI)
     - Vector search: ~50-100ms (pgvector)
-    - LLM generation: ~1000-2000ms (GPT-4o-mini)
+    - LLM generation: ~1000-2000ms (GPT-4.1-mini)
     - Total: typically 1.5-2.5 seconds
     
     **Cost Note:**
-    - Each question incurs: embedding cost (~$0.000002) + GPT-4o-mini cost (~$0.0001)
+    - Each question incurs: embedding cost (~$0.000002) + GPT-4.1-mini cost (~$0.0001)
     - Budget ~$0.0002 per question, 5000 questions = $1/month
     """
     import time

@@ -16,7 +16,7 @@ Architecture:
     - Uses LLM-as-judge pattern for semantic evaluation
     - Tracks metrics for regression detection
     - Supports offline (curated datasets) and online (production) evaluation
-    - Cost: ~$0.01 per evaluation (GPT-4o-mini)
+    - Cost: ~$0.01 per evaluation (GPT-4.1-mini)
     - Langfuse integration for automatic scoring and trace management
 
 Reference: docs-langchain LangSmith evaluation patterns
@@ -126,7 +126,7 @@ class RAGEvaluator:
     """
     Evaluate RAG pipeline quality for regression detection and quality assurance.
     
-    Uses GPT-4o-mini as judge for semantic evaluation of:
+    Uses GPT-4.1-mini as judge for semantic evaluation of:
     - Retrieval relevance (do chunks match question?)
     - Answer factuality (is answer supported by chunks?)
     - Hallucination detection (are claims from context?)
@@ -140,7 +140,7 @@ class RAGEvaluator:
         5. Log for monitoring dashboard
     
     Cost tracking:
-        - Each evaluation: ~400-500 tokens from GPT-4o-mini
+        - Each evaluation: ~400-500 tokens from GPT-4.1-mini
         - Cost: ~$0.01 per evaluation
         - Monthly budget: ~$50 for 5000 evaluations
     """
@@ -150,7 +150,7 @@ class RAGEvaluator:
         Initialize evaluator with AI service.
         
         Args:
-            ai_service: AI service for LLM evaluation (uses GPT-4o-mini)
+            ai_service: AI service for LLM evaluation (uses GPT-4.1-mini)
                        Defaults to global AIService instance
         """
         self.ai_service = ai_service or AIService()
@@ -478,7 +478,7 @@ Respond in JSON format:
         Evaluate if the routing decision was correct using LLM-as-a-Judge.
         
         Runs in background via FastAPI BackgroundTasks.
-        Uses GPT-4o (smarter model) to evaluate GPT-4o-mini (faster model).
+        Uses GPT-4 (smarter model) to evaluate GPT-4.1-mini (faster model).
         
         Args:
             trace_id: Langfuse trace ID for scoring
