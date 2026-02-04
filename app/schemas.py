@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, EmailStr, Field, validator, field_validator, ConfigDict
 from datetime import datetime, date
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any
 from decimal import Decimal
 from enum import Enum
 from uuid import UUID
@@ -1694,6 +1694,103 @@ class ExperimentSummary(BaseModel):
     total_tests: int = Field(description="Number of queries tested")
     successful_tests: int = Field(description="Tests without errors")
     failed_tests: int = Field(description="Tests with errors")
+
+
+# ============================================================================
+# PHASE 5C: Agentic Router Schemas
+# ============================================================================
+
+class AgenticRouteRequest(BaseModel):
+    """
+    Request for agentic query routing.
+    
+    The router analyzes the query and decides which tool to use:
+    - extract: Structured data extraction from documents
+    - query: Semantic search and Q&A over financial records
+    - hybrid: Complex queries requiring both extraction and search
+    
+    Example:
+        {
+            "query": "What was our Q4 2025 spending on events?",
+            "context": {"year": 2025, "quarter": "Q4"},
+            "enable_langfuse": true,
+            "enable_quality_scoring": false
+        }
+    """
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="User query to route to appropriate tool",
+        examples=["What was our Q4 spending?", "Extract data from invoice.pdf"]
+    )
+    context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Additional context for routing decision (document info, filters, etc.)"
+    )
+    enable_langfuse: bool = Field(
+        default=True,
+        description="Enable Langfuse observability tracing"
+    )
+    enable_quality_scoring: bool = Field(
+        default=False,
+        description="Enable LLM-as-Judge quality scoring (adds ~500ms latency)"
+    )
+
+
+class AgenticRouteResponse(BaseModel):
+    """
+    Response from agentic query routing.
+    
+    Contains the routing decision plus metrics for observability.
+    """
+    action: Literal["extract", "query", "hybrid"] = Field(
+        description="Selected tool: extract (structured data), query (semantic search), or hybrid (both)"
+    )
+    reasoning: str = Field(
+        description="Explanation for the routing decision"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence score for the routing decision (0.0 - 1.0)"
+    )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Langfuse trace ID for observability (if enabled)"
+    )
+    tokens: int = Field(
+        ge=0,
+        description="Total tokens used for routing decision"
+    )
+    cost: float = Field(
+        ge=0.0,
+        description="Cost in USD for the routing call"
+    )
+    latency_ms: float = Field(
+        ge=0.0,
+        description="Response time in milliseconds"
+    )
+    model: str = Field(
+        description="Model used for routing (e.g., gpt-4o-mini)"
+    )
+    prompt_version: str = Field(
+        description="Prompt version used (e.g., v2_detailed)"
+    )
+    quality_score: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Quality score from LLM-as-Judge (if enabled)"
+    )
+    expected_route: Optional[str] = Field(
+        default=None,
+        description="Expected route from quality scoring (if enabled)"
+    )
+    judge_reasoning: Optional[str] = Field(
+        default=None,
+        description="Judge's reasoning for quality score (if enabled)"
+    )
 
 
 # ============================================================================

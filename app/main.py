@@ -2906,6 +2906,104 @@ def add_message_to_conversation_endpoint(
 
 
 # ============================================================================
+# PHASE 5C: Agentic Router Endpoint
+# ============================================================================
+
+@app.post(
+    "/organizations/{org_id}/agentic/route",
+    response_model=schemas.AgenticRouteResponse,
+    tags=["Agentic Router"],
+    status_code=200,
+    summary="Route query to appropriate tool",
+    description="""
+    Intelligently route a natural language query to the appropriate processing tool.
+    
+    The agentic router analyzes the query and decides:
+    - **extract**: Use structured data extraction (for document uploads, invoice parsing)
+    - **query**: Use semantic search and RAG Q&A (for questions about existing documents)
+    - **hybrid**: Use both extraction and search (for complex multi-document analysis)
+    
+    **Features:**
+    - Langfuse observability with trace IDs
+    - Optional LLM-as-Judge quality scoring
+    - Cost and latency tracking
+    - Multiple prompt versions for A/B testing
+    
+    **Cost:** ~$0.001 per routing decision
+    **Latency:** ~200-500ms (add ~500ms for quality scoring)
+    """
+)
+async def route_query(
+    org_id: int = Path(..., gt=0, description="Organization ID"),
+    request: schemas.AgenticRouteRequest = Body(...),
+    db: Session = Depends(get_db)
+) -> schemas.AgenticRouteResponse:
+    """
+    Route a natural language query to the appropriate tool.
+    
+    Args:
+        org_id: Organization ID for context
+        request: Query and routing options
+        db: Database session
+        
+    Returns:
+        AgenticRouteResponse with routing decision and metrics
+        
+    Raises:
+        HTTPException: 404 if organization not found
+        HTTPException: 500 if routing fails
+    """
+    try:
+        # Verify organization exists
+        organization = crud.get_organization(db, org_id)
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        logger.info(f"Routing query for org {org_id}: {request.query[:50]}...")
+        
+        # Import and initialize router
+        from app.agentic_router import AgenticRouter
+        router = AgenticRouter()
+        
+        # Route the query
+        result = await router.route_query(
+            query=request.query,
+            context=request.context,
+            enable_langfuse=request.enable_langfuse,
+            enable_quality_scoring=request.enable_quality_scoring
+        )
+        
+        logger.info(
+            f"Routed to '{result['action']}' with confidence {result['confidence']:.2f} "
+            f"(latency={result['latency_ms']:.0f}ms, cost=${result['cost']:.6f})"
+        )
+        
+        return schemas.AgenticRouteResponse(
+            action=result["action"],
+            reasoning=result["reasoning"],
+            confidence=result["confidence"],
+            trace_id=result.get("trace_id"),
+            tokens=result["tokens"],
+            cost=result["cost"],
+            latency_ms=result["latency_ms"],
+            model=result["model"],
+            prompt_version=result["prompt_version"],
+            quality_score=result.get("quality_score"),
+            expected_route=result.get("expected_route"),
+            judge_reasoning=result.get("judge_reasoning")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Routing failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to route query: {str(e)}"
+        )
+
+
+# ============================================================================
 # PHASE 5C: Agent Orchestration Endpoints
 # ============================================================================
 
