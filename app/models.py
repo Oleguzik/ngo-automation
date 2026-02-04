@@ -282,7 +282,7 @@ class DocumentProcessing(Base):
     
     # File metadata
     file_name = Column(String(255), nullable=False)
-    file_type = Column(String(50), nullable=False)  # pdf, image, xlsx, csv, etc.
+    file_type = Column(String(200), nullable=False)  # pdf, image, xlsx, csv, etc. - Extended for long MIME types
     file_size = Column(Integer, nullable=False)  # bytes
     
     # Extraction results

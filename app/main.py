@@ -1003,13 +1003,13 @@ async def upload_pdf_with_ai_extraction(
                 
                 logger.info(f"Saved {len(saved_chunks)} chunks with embeddings for document {doc.id}")
                 
-                # Update document metadata
-                if doc.metadata is None:
-                    doc.metadata = {}
-                doc.metadata["chunks_created"] = len(saved_chunks)
-                doc.metadata["embeddings_generated"] = len(saved_chunks)
-                doc.metadata["rag_enabled"] = True
-                doc.metadata["rag_status"] = "completed"
+                # Update document extracted_data with RAG metadata
+                if doc.extracted_data is None:
+                    doc.extracted_data = {}
+                doc.extracted_data["chunks_created"] = len(saved_chunks)
+                doc.extracted_data["embeddings_generated"] = len(saved_chunks)
+                doc.extracted_data["rag_enabled"] = True
+                doc.extracted_data["rag_status"] = "completed"
                 
                 db.add(doc)
                 db.commit()
@@ -1020,10 +1020,10 @@ async def upload_pdf_with_ai_extraction(
             except Exception as e:
                 logger.error(f"RAG processing failed for document {doc.id}: {str(e)}")
                 # Log error but don't fail the upload - document is already saved
-                if doc.metadata is None:
-                    doc.metadata = {}
-                doc.metadata["rag_error"] = str(e)
-                doc.metadata["rag_status"] = "failed"
+                if doc.extracted_data is None:
+                    doc.extracted_data = {}
+                doc.extracted_data["rag_error"] = str(e)
+                doc.extracted_data["rag_status"] = "failed"
                 db.add(doc)
                 db.commit()
                 db.refresh(doc)

@@ -431,7 +431,7 @@ ExtractedProfitData.model_rebuild()
 class DocumentProcessingBase(BaseModel):
     """Base schema for document processing"""
     file_name: str = Field(..., description="Original filename")
-    file_type: str = Field(..., max_length=50, description="File type (pdf, image, xlsx, csv)")
+    file_type: str = Field(..., max_length=200, description="File type (pdf, image, xlsx, csv, MIME type)")
     file_size: int = Field(..., gt=0, description="File size in bytes")
 
 
