@@ -9,7 +9,7 @@ PHASE 3: Cost & Profit Analysis with LLM
 - Support for both unstructured text and structured table data (XLSX, CSV)
 """
 
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError
 from app.config import settings
 from app import schemas
 from typing import Optional, Dict, Any, List
@@ -17,6 +17,7 @@ from decimal import Decimal
 import json
 import logging
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -64,20 +65,43 @@ class AIService:
             all_messages.append({"role": "system", "content": system})
         all_messages.extend(messages)
         
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=all_messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            
-            content = response.choices[0].message.content
-            return {"content": content}
-            
-        except Exception as e:
-            logger.error(f"Chat completion failed: {str(e)}")
-            raise ValueError(f"Chat completion failed: {str(e)}")
+        max_retries = 3
+        retry_delay = 1.0  # seconds, doubles each retry
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=all_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                
+                content = response.choices[0].message.content
+                return {"content": content}
+                
+            except (APIConnectionError, APITimeoutError) as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"OpenAI connection error (attempt {attempt}/{max_retries}), "
+                        f"retrying in {retry_delay}s: {type(e).__name__}"
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error(f"Chat completion failed after {max_retries} attempts: {str(e)}")
+                    raise ValueError(f"Chat completion failed: {str(e)}")
+            except RateLimitError as e:
+                if attempt < max_retries:
+                    wait = 5.0 * attempt
+                    logger.warning(f"OpenAI rate limit hit, retrying in {wait}s (attempt {attempt}/{max_retries})")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"Rate limit exceeded after {max_retries} attempts: {str(e)}")
+                    raise ValueError(f"Chat completion failed: {str(e)}")
+            except Exception as e:
+                logger.error(f"Chat completion failed: {str(e)}")
+                raise ValueError(f"Chat completion failed: {str(e)}")
     
     def _extract_from_structured_data(self, text: str, analysis_type: str = "cost") -> Optional[Dict[str, Any]]:
         """

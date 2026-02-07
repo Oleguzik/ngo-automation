@@ -14,6 +14,12 @@ class EmbeddingBackend(Enum):
     OLLAMA = "ollama"
 
 
+class LLMBackend(Enum):
+    """Supported LLM backends for RAG generation."""
+    OPENAI = "openai"
+    OLLAMA = "ollama"
+
+
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
@@ -25,11 +31,14 @@ class Settings(BaseSettings):
         OPENAI_MODEL: Model to use for chat completion
         
         # Phase 5D: Embedding Backend Configuration
-        EMBEDDING_BACKEND: Which backend to use (openai | ollama)
+        EMBEDDING_BACKEND: Which backend to use for embeddings (openai | ollama)
         OPENAI_EMBEDDING_MODEL: OpenAI embedding model (if backend=openai)
         OLLAMA_BASE_URL: Ollama API endpoint (if backend=ollama)
         OLLAMA_EMBEDDING_MODEL: Ollama embedding model (if backend=ollama)
-        OLLAMA_CHAT_MODEL: Ollama chat model for future use
+        OLLAMA_CHAT_MODEL: Ollama chat model for generation
+        
+        # Phase 5E: LLM Backend Configuration (Hybrid RAG)
+        LLM_BACKEND: Which backend to use for generation (openai | ollama)
     """
     
     DATABASE_URL: str = "postgresql://ngo_user:secure_password@postgres:5432/ngo_db"
@@ -42,7 +51,10 @@ class Settings(BaseSettings):
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"  # 1536 dims (if using OpenAI)
     OLLAMA_BASE_URL: str = "http://ollama:11434"  # Docker service name
     OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"  # 768 dims (default local model)
-    OLLAMA_CHAT_MODEL: str = "llama3.2"  # For future agent orchestration
+    OLLAMA_CHAT_MODEL: str = "llama3.2"  # For generation
+    
+    # Phase 5E: LLM Backend Selection (Hybrid RAG)
+    LLM_BACKEND: str = "openai"  # Default to OpenAI (production quality)
     
     class Config:
         """Pydantic configuration to load from .env file"""

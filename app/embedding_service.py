@@ -190,10 +190,54 @@ def get_embedding_model_name() -> str:
         return "unknown"
 
 
+def get_embedding_column_name() -> str:
+    """
+    Get the document_chunks column name for the active embedding backend.
+    
+    Returns:
+        Column name string (embedding_768 or embedding_1536)
+        
+    Raises:
+        ValueError: If the active embedding dimensions are unsupported
+        
+    Example:
+        >>> from app.embedding_service import get_embedding_column_name
+        >>> get_embedding_column_name()
+        'embedding_768'
+    """
+    dimensions = get_embedding_dimensions()
+    return get_embedding_column_name_for_dimensions(dimensions)
+
+
+def get_embedding_column_name_for_dimensions(dimensions: int) -> str:
+    """
+    Map embedding dimensions to the appropriate document_chunks column.
+    
+    Args:
+        dimensions: Embedding vector dimensions
+        
+    Returns:
+        Column name string
+        
+    Raises:
+        ValueError: If dimensions are not supported by the schema
+    """
+    if dimensions == 768:
+        return "embedding_768"
+    if dimensions == 1536:
+        return "embedding_1536"
+    raise ValueError(
+        f"Unsupported embedding dimensions: {dimensions}. "
+        "Add a new embedding column or switch to a supported backend."
+    )
+
+
 # Convenience exports
 __all__ = [
     "get_embedding_service",
     "get_embedding_dimensions",
     "get_embedding_model_name",
+    "get_embedding_column_name",
+    "get_embedding_column_name_for_dimensions",
     "BaseEmbeddingService",
 ]

@@ -325,7 +325,9 @@ class DocumentChunk(Base):
         id: Unique identifier (auto-increment)
         document_processing_id: Foreign key to DocumentProcessing (source document)
         chunk_text: Text content of chunk (up to ~2000 characters ~ 500 tokens)
-        embedding: Vector embedding (1536 dimensions) for semantic search
+        embedding_768: Ollama embedding (768 dimensions)
+        embedding_1536: OpenAI embedding (1536 dimensions)
+        embedding (legacy): Deprecated column retained in DB only
         chunk_index: Position of chunk within document (0, 1, 2, ...)
         metadata: Additional metadata as JSON (page_number, section, language, etc.)
         created_at: Chunk creation timestamp
@@ -366,8 +368,10 @@ class DocumentChunk(Base):
     # Chunk content
     chunk_text = Column(Text, nullable=False)  # Up to ~2000 chars (500 tokens)
     
-    # Vector embedding (1536 dimensions for text-embedding-3-small)
-    embedding = Column(Vector(1536), nullable=False)
+    # Backend-specific embeddings (non-destructive backend switching)
+    embedding_768 = Column(Vector(768), nullable=True)
+    embedding_1536 = Column(Vector(1536), nullable=True)
+    # Legacy column "embedding" may exist in the database (not mapped here)
     
     # Chunk position in document
     chunk_index = Column(Integer, nullable=False)

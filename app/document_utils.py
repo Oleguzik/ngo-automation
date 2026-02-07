@@ -47,7 +47,10 @@ def extract_text_from_pdf(file_bytes: bytes) -> Optional[str]:
         for page_num, page in enumerate(pdf_reader.pages):
             page_text = page.extract_text()
             if page_text.strip():
-                text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                # Remove NUL characters and other control characters that cause issues
+                cleaned_text = ''.join(char for char in page_text if char != '\x00' and (char.isprintable() or char.isspace()))
+                if cleaned_text.strip():
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{cleaned_text}")
         
         full_text = "\n\n".join(text_parts)
         return full_text if full_text.strip() else None

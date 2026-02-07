@@ -27,7 +27,6 @@ import time
 import os
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
-from uuid import UUID
 
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
@@ -35,8 +34,7 @@ from pydantic import ValidationError
 
 # Langfuse imports
 try:
-    from langfuse import observe
-    from langfuse import Langfuse
+    from langfuse import observe, get_client
     LANGFUSE_AVAILABLE = True
 except ImportError:
     LANGFUSE_AVAILABLE = False
@@ -45,19 +43,18 @@ except ImportError:
 from app.ai_service import AIService
 from app.crud import search_similar_chunks
 from app.embedding_service import get_embedding_service
+from app.enhanced_langfuse_monitor import enhanced_monitor, trace_rag_query
 from app.models import DocumentChunk, DocumentProcessing
 from app.schemas import SourceCitation, RAGResponse
 from app.semantic_cache import get_semantic_cache
+from app.ollama_chat_service import get_ollama_chat_service
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Initialize Langfuse if available
 if LANGFUSE_AVAILABLE and os.getenv("LANGFUSE_PUBLIC_KEY"):
-    langfuse = Langfuse(
-        public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-        secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-        host=os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
-    )
+    langfuse = get_client()
 else:
     langfuse = None
 
@@ -123,8 +120,15 @@ class RAGService:
         """
         self.embedding_service = get_embedding_service()
         self.ai_service = AIService()
+        self.ollama_chat = get_ollama_chat_service()
         self.use_cache = use_cache
         self.semantic_cache = get_semantic_cache() if use_cache else None
+        
+        # Determine which LLM backend to use
+        self.llm_backend = settings.LLM_BACKEND.lower()
+        self.model_name = settings.OPENAI_MODEL if self.llm_backend == "openai" else settings.OLLAMA_CHAT_MODEL
+        
+        logger.info(f"RAGService initialized: llm_backend={self.llm_backend}, model={self.model_name}")
     
     async def query_async(
         self,
@@ -190,6 +194,7 @@ class RAGService:
         return response
     
     
+    @trace_rag_query
     def query(
         self,
         question: str,
@@ -199,7 +204,8 @@ class RAGService:
         temperature: float = RAG_TEMPERATURE,
         min_similarity: float = 0.5,
         background_tasks: Optional[BackgroundTasks] = None,
-        enable_evaluation: bool = False
+        enable_evaluation: bool = False,
+        rag_context: Dict[str, Any] = None  # Injected by decorator
     ) -> RAGResponse:
         """
         Answer a question using RAG pipeline (synchronous wrapper).
@@ -259,15 +265,17 @@ class RAGService:
             db=db,
             top_k=top_k,
             temperature=temperature,
-            min_similarity=min_similarity
+            min_similarity=min_similarity,
+            rag_context=rag_context  # Pass monitoring context
         )
         
         # Schedule background evaluation if enabled
         if enable_evaluation and background_tasks and LANGFUSE_AVAILABLE and langfuse:
-            from app.evaluation_service import EvaluationService
+            from app.evaluation_service import RAGEvaluator
             
-            # Create trace for this query
-            trace = langfuse.trace(
+            # Create trace for this query using SDK v3 API
+            with langfuse.start_as_current_observation(
+                as_type="span",
                 name="rag_query",
                 input={"question": question, "organization_id": organization_id},
                 output={"answer": response.answer},
@@ -275,33 +283,39 @@ class RAGService:
                     "chunks_used": response.chunks_used,
                     "confidence": response.confidence,
                     "top_k": top_k,
-                    "min_similarity": min_similarity
-                },
-                tags=["rag", "phase5c"]
-            )
-            
-            # Construct context from sources
-            context_str = "\n\n".join([
-                f"[{s.document_name}] Similarity: {s.similarity_score}"
-                for s in response.sources
-            ])
-            
-            # Schedule faithfulness evaluation
-            eval_service = EvaluationService()
-            background_tasks.add_task(
-                eval_service.evaluate_faithfulness,
-                trace_id=trace.id,
-                query=question,
-                context=context_str,
-                response=response.answer
-            )
-            
-            logger.info(f"Scheduled faithfulness evaluation for trace {trace.id}")
-            
-            # Add trace_id to response metadata (for reference)
-            response_dict = response.model_dump()
-            response_dict["trace_id"] = trace.id
-            response = RAGResponse(**response_dict)
+                    "min_similarity": min_similarity,
+                    "tags": ["rag", "phase5c"]  # Move tags to metadata for v3
+                }
+            ) as rag_trace:
+                # Get the trace ID for evaluation
+                trace_id = langfuse.get_current_trace_id()
+                
+                # Construct context from sources
+                context_str = "\n\n".join([
+                    f"[{s.document_name}] Similarity: {s.similarity_score}"
+                    for s in response.sources
+                ])
+                
+                # Schedule faithfulness evaluation
+                evaluator = RAGEvaluator()
+                background_tasks.add_task(
+                    evaluator.evaluate_faithfulness,
+                    trace_id=trace_id,
+                    query=question,
+                    context=context_str,
+                    response=response.answer
+                )
+                
+                logger.info(f"Scheduled faithfulness evaluation for trace {trace_id}")
+                
+                # Add trace_id to response metadata (create new response with additional data)
+                base_url = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
+                response_dict = response.model_dump()
+                # Note: RAGResponse doesn't have metadata field, so we'll add trace info to a copy
+                response_dict["trace_id"] = trace_id
+                # Don't modify the original response, just log trace info
+                
+                logger.info(f"🎉 RAG query with Langfuse tracing completed: {base_url}/trace/{trace_id}")
         
         # Cache result
         if self.use_cache and self.semantic_cache:
@@ -320,7 +334,8 @@ class RAGService:
         db: Session,
         top_k: int = 10,
         temperature: float = RAG_TEMPERATURE,
-        min_similarity: float = 0.5
+        min_similarity: float = 0.5,
+        rag_context: Dict[str, Any] = None  # Monitoring context
     ) -> RAGResponse:
         """
         Execute full RAG pipeline (internal method).
@@ -362,6 +377,7 @@ class RAGService:
         
         # Step 2: Search for similar chunks
         try:
+            retrieval_start = time.time()
             logger.debug(f"Searching similar chunks (top_k={top_k})")
             search_results = search_similar_chunks(
                 query_embedding=query_embedding,
@@ -370,11 +386,25 @@ class RAGService:
                 top_k=top_k,
                 min_similarity=min_similarity
             )
+            retrieval_time = time.time() - retrieval_start
+            
+            # Track retrieval metrics with enhanced monitoring
+            avg_similarity = sum(r.get("similarity_score", 0.0) for r in search_results) / len(search_results) if search_results else 0.0
+            if rag_context and enhanced_monitor.monitoring_enabled:
+                enhanced_monitor.add_rag_retrieval_span(
+                    rag_context,
+                    chunks_found=len(search_results),
+                    avg_similarity=avg_similarity,
+                    retrieval_time=retrieval_time
+                )
+            
             logger.info(
                 f"Vector search complete",
                 extra={
                     "chunks_found": len(search_results),
-                    "min_similarity": min_similarity
+                    "min_similarity": min_similarity,
+                    "retrieval_time_ms": round(retrieval_time * 1000, 2),
+                    "avg_similarity": round(avg_similarity, 3)
                 }
             )
         except Exception as e:
@@ -422,7 +452,7 @@ class RAGService:
             try:
                 citation = SourceCitation(
                     document_name=doc_name,
-                    chunk_id=UUID(chunk_id) if isinstance(chunk_id, str) else chunk_id,
+                    chunk_id=int(chunk_id) if chunk_id else 0,
                     similarity_score=round(float(similarity), 3),
                     page_number=page_num
                 )
@@ -436,34 +466,65 @@ class RAGService:
         
         logger.debug(f"Context constructed: {len(context)} chars from {len(search_results)} chunks")
         
-        # Step 4: Generate answer with GPT-4.1-mini
+        # Step 4: Generate answer using configured LLM backend (OpenAI or Ollama)
         try:
+            generation_start = time.time()
             prompt = RAG_SYSTEM_PROMPT.format(
                 context=context,
                 question=question
             )
             
-            logger.debug(f"Calling GPT-4.1-mini (temperature={temperature})")
-            response = self.ai_service.chat(
-                messages=[
-                    {"role": "system", "content": RAG_SYSTEM_PROMPT[:200] + "..."},  # Truncate for logging
-                    {"role": "user", "content": question}
-                ],
-                system=RAG_SYSTEM_PROMPT.format(context=context, question=""),
-                temperature=temperature,
-                max_tokens=1000
-            )
+            logger.debug(f"Calling {self.llm_backend.upper()} {self.model_name} (temperature={temperature})")
+            
+            # Choose backend based on configuration
+            if self.llm_backend == "ollama":
+                # Use Ollama local model
+                response = self.ollama_chat.generate(
+                    messages=[
+                        {"role": "system", "content": RAG_SYSTEM_PROMPT.format(context=context, question="")},
+                        {"role": "user", "content": question}
+                    ],
+                    temperature=temperature,
+                    max_tokens=1000
+                )
+            else:
+                # Use OpenAI (default)
+                response = self.ai_service.chat(
+                    messages=[
+                        {"role": "system", "content": RAG_SYSTEM_PROMPT[:200] + "..."},  # Truncate for logging
+                        {"role": "user", "content": question}
+                    ],
+                    system=RAG_SYSTEM_PROMPT.format(context=context, question=""),
+                    temperature=temperature,
+                    max_tokens=1000
+                )
+            
+            generation_time = time.time() - generation_start
             
             answer = response.get("content", "").strip()
             
             if not answer:
                 answer = "Unable to generate answer from retrieved documents."
             
+            # Track generation metrics
+            tokens_used = response.get("usage", {}).get("total_tokens") or response.get("tokens_used", len(answer) // 4)
+            if rag_context and enhanced_monitor.monitoring_enabled:
+                enhanced_monitor.add_rag_generation_span(
+                    rag_context,
+                    model=self.model_name,
+                    tokens_used=tokens_used,
+                    generation_time=generation_time,
+                    answer=answer,
+                    confidence=0.0  # Will be updated below
+                )
+            
             logger.info(
                 f"Answer generated",
                 extra={
                     "answer_length": len(answer),
-                    "chunks_used": len(search_results)
+                    "chunks_used": len(search_results),
+                    "generation_time_ms": round(generation_time * 1000, 2),
+                    "tokens_used": tokens_used
                 }
             )
         except Exception as e:
@@ -477,6 +538,16 @@ class RAGService:
             confidence = min(1.0, max(0.0, confidence))  # Clamp to 0-1
         else:
             confidence = 0.0
+        
+        # Update generation span with confidence score
+        if rag_context and enhanced_monitor.monitoring_enabled:
+            # Update the generation span with calculated confidence
+            generation_spans = rag_context.get("spans", {})
+            if "generation" in generation_spans:
+                generation_span = generation_spans["generation"]
+                # Note: Cannot modify span output after creation in Langfuse
+                # This is informational for our tracking
+                logger.debug(f"Final confidence score: {confidence:.3f}")
         
         logger.info(
             f"RAG Query completed",

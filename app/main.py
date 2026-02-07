@@ -3,14 +3,15 @@ FastAPI application with REST API endpoints for NGO management.
 Provides CRUD operations for Organizations and Projects.
 """
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Header, Path, Body, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Query, Header, Path, Body, UploadFile, File, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date
 from uuid import UUID
 import logging
+import os
 
 from app import models, schemas, crud
 from app.database import engine, get_db, Base
@@ -26,9 +27,8 @@ logger = logging.getLogger(__name__)
 # Initialize AI Service
 ai_service = AIService()
 
-# Create database tables from SQLAlchemy models
-# (Will be managed by Alembic migrations after initial setup)
-Base.metadata.create_all(bind=engine)
+# Tables are now managed by Alembic migrations - do not create here
+# Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -76,6 +76,53 @@ def health_check():
         {"status": "ok"}
     """
     return {"status": "ok"}
+
+
+@app.get("/docs/demo", response_class=HTMLResponse, tags=["Utilities"])
+def swagger_demo_intro() -> HTMLResponse:
+        """
+        Simple Swagger UI landing page with links to demo steps.
+        """
+        html = """<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>NGO Automation Demo</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 24px; color: #1a1a1a; }
+            h1 { margin-bottom: 8px; }
+            .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; max-width: 860px; }
+            ul { line-height: 1.6; }
+            code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; }
+            a { color: #0b6efd; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>NGO Automation Demo</h1>
+            <p>Use Swagger UI to run the live demo steps below. For full curl scripts, see <code>docs/FEATURE_TESTING_REQUESTS.md</code>.</p>
+            <p>
+                <a href="/docs">Open Swagger UI</a> ·
+                <a href="/redoc">Open ReDoc</a>
+            </p>
+            <h2>Demo Steps</h2>
+            <ul>
+                <li><a href="/docs#/Utilities/health_check">Health Check</a></li>
+                <li><a href="/docs#/Organizations/create_organization">Create Organization</a></li>
+                <li><a href="/docs#/Projects/create_project">Create Project</a></li>
+                <li><a href="/docs#/Transactions/create_transaction">Create Transaction</a></li>
+                <li><a href="/docs#/Document%20Processing/upload_pdf_with_ai_extraction">Upload Document (PDF/XLSX/PNG)</a></li>
+                <li><a href="/docs#/RAG%20-%20Semantic%20Search/semantic_document_search">Semantic Search</a></li>
+                <li><a href="/docs#/RAG%20-%20Q%26A/rag_query_endpoint">RAG Q&amp;A</a></li>
+                <li><a href="/docs#/Analysis/analyze_cost_profit_data">AI Cost/Profit Analysis</a></li>
+            </ul>
+        </div>
+    </body>
+</html>
+"""
+        return HTMLResponse(content=html)
 
 
 # ========== Organization Endpoints ==========
@@ -725,7 +772,9 @@ Period: {summary.period_start} to {summary.period_end}
     "/organizations/{organization_id}/documents/upload",
     response_model=schemas.DocumentProcessingResponse,
     status_code=201,
-    tags=["Document Processing"]
+    tags=["Document Processing - Metadata Only"],
+    summary="Register Document Metadata (JSON, no file)",
+    deprecated=True
 )
 def upload_document_for_processing(
     organization_id: int,
@@ -733,12 +782,14 @@ def upload_document_for_processing(
     db: Session = Depends(get_db)
 ):
     """
-    Upload document (receipt, invoice, bank statement) for AI processing.
+    ⚠️ **DEPRECATED** - Use `/organizations/{organization_id}/documents/upload-file` instead.
     
-    In MVP, documents are registered but processing via OpenAI is deferred.
-    Next phase: Implement actual OCR and AI extraction.
+    This endpoint registers document metadata via JSON but does NOT accept file uploads.
+    For actual file upload with AI extraction, use the `upload-file` endpoint.
     
-    File types: PDF, image, Excel, CSV
+    **To upload a file, use:**
+    `POST /organizations/{organization_id}/documents/upload-file`
+    (accepts multipart/form-data with file, analysis_type, enable_rag, enable_langfuse)
     """
     org = crud.get_organization(db, organization_id)
     if not org:
@@ -792,13 +843,15 @@ def get_document(
     "/organizations/{organization_id}/documents/upload-file",
     response_model=schemas.DocumentProcessingResponse,
     status_code=201,
-    tags=["Document Processing"]
+    tags=["Document Processing"],
+    summary="Upload File with AI Extraction (use this for file uploads)"
 )
 async def upload_pdf_with_ai_extraction(
     organization_id: int,
     file: UploadFile = File(...),
-    analysis_type: str = Query("cost", regex="^(cost|profit)$"),
-    enable_rag: bool = Query(False, description="Enable RAG chunking and embedding (Phase 5)"),
+    analysis_type: str = Form("cost", description="Analysis type: cost or profit"),
+    enable_rag: bool = Form(True, description="Enable RAG chunking and embedding (Phase 5)"),
+    enable_langfuse: bool = Form(True, description="Enable Langfuse tracing for AI operations"),
     db: Session = Depends(get_db)
 ):
     """
@@ -851,6 +904,23 @@ async def upload_pdf_with_ai_extraction(
     ```
     """
     try:
+        # Validate analysis_type parameter
+        if analysis_type not in ["cost", "profit"]:
+            raise HTTPException(
+                status_code=422, 
+                detail="analysis_type must be either 'cost' or 'profit'"
+            )
+        
+        # Initialize Langfuse tracing if enabled
+        if enable_langfuse:
+            try:
+                from langfuse import get_client
+                langfuse = get_client()
+                logger.info("🔍 Langfuse client initialized for document upload tracing")
+            except Exception as e:
+                logger.warning(f"Langfuse initialization failed: {e}")
+                langfuse = None
+        
         # Verify organization exists
         org = crud.get_organization(db, organization_id)
         if not org:
@@ -910,33 +980,319 @@ async def upload_pdf_with_ai_extraction(
                 detail=f"Document appears to be empty or contains no extractable text (format: {file_format.upper()})"
             )
         
-        # AI extraction based on analysis type
-        try:
-            if analysis_type == "cost":
-                logger.info("Extracting cost/expense data with AI")
-                extracted_data = ai_service.extract_cost_from_text(raw_text)
-            else:  # profit
-                logger.info("Extracting profit/revenue data with AI")
-                extracted_data = ai_service.extract_profit_from_text(raw_text)
-            
-            logger.info(f"AI extraction successful: {extracted_data}")
-        except Exception as e:
-            logger.error(f"AI extraction failed: {str(e)}")
-            # Still save document but mark as failed
-            doc = models.DocumentProcessing(
-                organization_id=organization_id,
-                file_name=file.filename,
-                file_type=file.content_type,
-                file_size=file_size,
-                raw_text=raw_text,
-                extracted_data=None,
-                processing_status="failed",
-                error_message=f"AI extraction error: {str(e)}"
-            )
-            db.add(doc)
-            db.commit()
-            db.refresh(doc)
-            return doc
+        # Clean text to remove NUL characters and other problematic chars
+        def clean_text_for_ai(text: str) -> str:
+            """Remove NUL characters and other problematic characters from text."""
+            if not text:
+                return text
+            # Remove NUL characters and other control characters except newlines/tabs
+            cleaned = ''.join(char for char in text if char.isprintable() or char in '\n\t\r')
+            return cleaned
+        
+        raw_text = clean_text_for_ai(raw_text)
+        logger.info(f"Cleaned text: {len(raw_text)} characters")
+        
+        # AI extraction based on analysis type with Langfuse tracing
+        if enable_langfuse and langfuse:
+            # Use Langfuse SDK v3 context manager API for complete workflow tracing
+            with langfuse.start_as_current_observation(
+                as_type="span",
+                name="document_upload_with_ai_extraction",
+                input={
+                    "file_name": file.filename,
+                    "file_type": file.content_type,
+                    "organization_id": organization_id,
+                    "analysis_type": analysis_type,
+                    "enable_rag": enable_rag
+                },
+                metadata={
+                    "endpoint": "/organizations/{organization_id}/documents/upload-file",
+                    "ai_operations": ["text_extraction", "openai_analysis", "rag_chunking"] if enable_rag else ["text_extraction", "openai_analysis"],
+                    "tags": ["document_upload", "ai_extraction", "phase5c"],
+                    "file_size_bytes": file_size
+                }
+            ) as main_trace:
+                try:
+                    # AI extraction sub-span
+                    with langfuse.start_as_current_observation(
+                        as_type="generation",
+                        name=f"openai_{analysis_type}_extraction",
+                        input={"text_length": len(raw_text), "analysis_type": analysis_type},
+                        metadata={"model": "gpt-4.1-mini", "file_format": file_format}
+                    ) as ai_span:
+                        if analysis_type == "cost":
+                            logger.info("Extracting cost/expense data with AI")
+                            extracted_data = ai_service.extract_cost_from_text(raw_text)
+                        else:  # profit
+                            logger.info("Extracting profit/revenue data with AI")
+                            extracted_data = ai_service.extract_profit_from_text(raw_text)
+                        
+                        ai_span.update(
+                            output=extracted_data,
+                            metadata={"extraction_success": True, "confidence": extracted_data.get("confidence", 0)}
+                        )
+                        
+                        logger.info(f"AI extraction successful: {extracted_data}")
+                    
+                    # Complete document processing within trace
+                    # Handle empty/failed AI extraction - check if data has meaningful content
+                    if not extracted_data or (isinstance(extracted_data, dict) and len(extracted_data) == 0):
+                        doc = models.DocumentProcessing(
+                            organization_id=organization_id,
+                            file_name=file.filename,
+                            file_type=file.content_type,
+                            file_size=file_size,
+                            raw_text=raw_text,
+                            extracted_data={},
+                            processing_status="failed",
+                            error_message="AI extraction returned empty result"
+                        )
+                        db.add(doc)
+                        db.commit()
+                        db.refresh(doc)
+                        
+                        main_trace.update(output={
+                            "document_id": str(doc.id),
+                            "status": "failed",
+                            "error": "Empty AI extraction result"
+                        })
+                        
+                        return doc
+
+                    # Save document with extracted data
+                    doc = models.DocumentProcessing(
+                        organization_id=organization_id,
+                        file_name=file.filename,
+                        file_type=file.content_type,
+                        file_size=file_size,
+                        raw_text=raw_text,
+                        extracted_data=extracted_data,
+                        processing_status="completed",
+                        error_message=None
+                    )
+                    db.add(doc)
+                    db.commit()
+                    db.refresh(doc)
+                    
+                    # Update trace with final results
+                    main_trace.update(output={
+                        "document_id": str(doc.id),
+                        "file_name": doc.file_name,
+                        "processing_status": doc.processing_status,
+                        "extracted_data": doc.extracted_data,
+                        "rag_enabled": enable_rag,
+                        "success": True
+                    })
+                    
+                    logger.info(f"Document processing completed with full Langfuse tracing")
+                    
+                    # Phase 5: RAG processing (chunking + embedding) - AFTER Langfuse trace update
+                    if enable_rag:
+                        try:
+                            from app.chunking_service import ChunkingService
+                            from app.embedding_service import get_embedding_service
+                            
+                            logger.info(f"Starting RAG processing for document {doc.id}")
+                            
+                            # Chunk the document
+                            chunking_service = ChunkingService()
+                            chunks = chunking_service.chunk_text(
+                                raw_text,
+                                chunk_size=500,
+                                overlap=50,
+                                strategy="fixed",
+                                metadata={"source": file.filename, "org_id": organization_id}
+                            )
+                            logger.info(f"Created {len(chunks)} chunks for document {doc.id}")
+                            
+                            # Generate embeddings and save chunks
+                            embedding_service = get_embedding_service()
+                            saved_chunks = crud.create_document_chunks(
+                                db=db,
+                                document_processing_id=doc.id,
+                                chunks=chunks,
+                                embedding_service=embedding_service
+                            )
+                            
+                            logger.info(f"Saved {len(saved_chunks)} chunks with embeddings for document {doc.id}")
+                            
+                            # Update document extracted_data with RAG metadata
+                            if doc.extracted_data is None:
+                                doc.extracted_data = {}
+                            doc.extracted_data["chunks_created"] = len(saved_chunks)
+                            doc.extracted_data["embeddings_generated"] = len(saved_chunks)
+                            doc.extracted_data["rag_enabled"] = True
+                            doc.extracted_data["rag_status"] = "completed"
+                            
+                            db.add(doc)
+                            db.commit()
+                            db.refresh(doc)
+                            
+                            logger.info(f"RAG processing completed for document {doc.id}")
+                            
+                            # Update Langfuse trace with RAG results
+                            main_trace.update(output={
+                                "document_id": str(doc.id),
+                                "file_name": doc.file_name,
+                                "processing_status": doc.processing_status,
+                                "extracted_data": doc.extracted_data,
+                                "rag_enabled": enable_rag,
+                                "chunks_created": len(saved_chunks),
+                                "success": True
+                            })
+                            
+                        except Exception as e:
+                            logger.error(f"RAG processing failed for document {doc.id}: {str(e)}")
+                            # Update document status to indicate RAG failure
+                            if doc.extracted_data is None:
+                                doc.extracted_data = {}
+                            doc.extracted_data["rag_enabled"] = enable_rag
+                            doc.extracted_data["rag_status"] = "failed"
+                            doc.extracted_data["rag_error"] = str(e)
+                            
+                            db.add(doc)
+                            db.commit()
+                            db.refresh(doc)
+                            
+                            # Update Langfuse trace with RAG failure
+                            main_trace.update(output={
+                                "document_id": str(doc.id),
+                                "file_name": doc.file_name,
+                                "processing_status": doc.processing_status,
+                                "extracted_data": doc.extracted_data,
+                                "rag_enabled": enable_rag,
+                                "rag_error": str(e),
+                                "success": True  # Document processing succeeded even if RAG failed
+                            })
+                    
+                    return doc
+                    
+                except Exception as e:
+                    main_trace.update(output={"error": str(e), "status": "failed"})
+                    logger.error(f"AI extraction failed: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"AI processing failed: {str(e)}")
+        else:
+            # No Langfuse tracing, simple extraction and processing
+            try:
+                if analysis_type == "cost":
+                    logger.info("Extracting cost/expense data with AI")
+                    extracted_data = ai_service.extract_cost_from_text(raw_text)
+                else:  # profit
+                    logger.info("Extracting profit/revenue data with AI")
+                    extracted_data = ai_service.extract_profit_from_text(raw_text)
+                
+                logger.info(f"AI extraction successful: {extracted_data}")
+                
+                # Complete document processing without tracing
+                # Handle empty/failed AI extraction - check if data has meaningful content
+                if not extracted_data or (isinstance(extracted_data, dict) and len(extracted_data) == 0):
+                    doc = models.DocumentProcessing(
+                        organization_id=organization_id,
+                        file_name=file.filename,
+                        file_type=file.content_type,
+                        file_size=file_size,
+                        raw_text=raw_text,
+                        extracted_data={},
+                        processing_status="failed",
+                        error_message="AI extraction returned empty result"
+                    )
+                    db.add(doc)
+                    db.commit()
+                    db.refresh(doc)
+                    return doc
+
+                # Save document with extracted data
+                doc = models.DocumentProcessing(
+                    organization_id=organization_id,
+                    file_name=file.filename,
+                    file_type=file.content_type,
+                    file_size=file_size,
+                    raw_text=raw_text,
+                    extracted_data=extracted_data,
+                    processing_status="completed",
+                    error_message=None
+                )
+                db.add(doc)
+                db.commit()
+                db.refresh(doc)
+                
+                logger.info(f"Document processing completed without tracing")
+                
+                # Phase 5: RAG processing (chunking + embedding) - non-Langfuse path
+                if enable_rag:
+                    try:
+                        from app.chunking_service import ChunkingService
+                        from app.embedding_service import get_embedding_service
+                        
+                        logger.info(f"Starting RAG processing for document {doc.id} (no-trace path)")
+                        
+                        # Chunk the document
+                        chunking_service = ChunkingService()
+                        chunks = chunking_service.chunk_text(
+                            raw_text,
+                            chunk_size=500,
+                            overlap=50,
+                            strategy="fixed",
+                            metadata={"source": file.filename, "org_id": organization_id}
+                        )
+                        logger.info(f"Created {len(chunks)} chunks for document {doc.id}")
+                        
+                        # Generate embeddings and save chunks
+                        embedding_service = get_embedding_service()
+                        saved_chunks = crud.create_document_chunks(
+                            db=db,
+                            document_processing_id=doc.id,
+                            chunks=chunks,
+                            embedding_service=embedding_service
+                        )
+                        
+                        logger.info(f"Saved {len(saved_chunks)} chunks with embeddings for document {doc.id}")
+                        
+                        # Update document extracted_data with RAG metadata
+                        if doc.extracted_data is None:
+                            doc.extracted_data = {}
+                        doc.extracted_data["chunks_created"] = len(saved_chunks)
+                        doc.extracted_data["embeddings_generated"] = len(saved_chunks)
+                        doc.extracted_data["rag_enabled"] = True
+                        doc.extracted_data["rag_status"] = "completed"
+                        
+                        db.add(doc)
+                        db.commit()
+                        db.refresh(doc)
+                        
+                        logger.info(f"RAG processing completed for document {doc.id} (no-trace path)")
+                        
+                    except Exception as rag_e:
+                        logger.error(f"RAG processing failed for document {doc.id}: {str(rag_e)}")
+                        if doc.extracted_data is None:
+                            doc.extracted_data = {}
+                        doc.extracted_data["rag_enabled"] = enable_rag
+                        doc.extracted_data["rag_status"] = "failed"
+                        doc.extracted_data["rag_error"] = str(rag_e)
+                        db.add(doc)
+                        db.commit()
+                        db.refresh(doc)
+                
+                return doc
+                
+            except Exception as e:
+                logger.error(f"AI extraction failed: {str(e)}")
+                # Still save document but mark as failed
+                doc = models.DocumentProcessing(
+                    organization_id=organization_id,
+                    file_name=file.filename,
+                    file_type=file.content_type,
+                    file_size=file_size,
+                    raw_text=raw_text,
+                    extracted_data=None,
+                    processing_status="failed",
+                    error_message=f"AI extraction error: {str(e)}"
+                )
+                db.add(doc)
+                db.commit()
+                db.refresh(doc)
+                
+                return doc
         
         # If extraction is empty, mark as failed with clear error
         if not extracted_data or (isinstance(extracted_data, dict) and len(extracted_data) == 0):
@@ -1028,6 +1384,8 @@ async def upload_pdf_with_ai_extraction(
                 db.commit()
                 db.refresh(doc)
         
+        logger.info(f"Document saved successfully: {doc.id} with Langfuse tracing")
+        
         return doc
         
     except HTTPException:
@@ -1041,7 +1399,8 @@ async def upload_pdf_with_ai_extraction(
     "/documents/upload",
     response_model=schemas.DocumentProcessingResponse,
     status_code=201,
-    tags=["Document Processing"]
+    tags=["Document Processing"],
+    summary="Quick File Upload (testing convenience endpoint)"
 )
 async def upload_document_convenience(
     file: UploadFile = File(...),
@@ -2347,7 +2706,7 @@ def semantic_document_search(
     Returns chunks ranked by cosine similarity to the query.
     
     **How it works:**
-    1. Embed user query using OpenAI text-embedding-3-small (1536 dims)
+    1. Embed user query using active embedding backend
     2. Search document chunks in database using pgvector cosine similarity
     3. Return top-K chunks with similarity scores
     4. Can cite specific documents/pages for transparency
@@ -2455,6 +2814,7 @@ def semantic_document_search(
 def rag_query_endpoint(
     organization_id: int,
     request: schemas.RAGRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ) -> schemas.RAGResponse:
     """
@@ -2558,7 +2918,7 @@ def rag_query_endpoint(
             }
         )
         
-        # Use RAGService to process query
+        # Use RAGService to process query with Langfuse tracing if enabled
         from app.rag_service import RAGService
         
         rag_service = RAGService()
@@ -2568,7 +2928,9 @@ def rag_query_endpoint(
             db=db,
             top_k=request.top_k,
             temperature=request.temperature,
-            min_similarity=request.min_similarity
+            min_similarity=request.min_similarity,
+            background_tasks=background_tasks if request.enable_langfuse else None,
+            enable_evaluation=request.enable_langfuse
         )
         
         logger.info(
@@ -3320,7 +3682,7 @@ def submit_user_feedback(
 # LANGFUSE ADVANCED FEATURES ENDPOINTS
 # ========================================
 
-@app.post("/langfuse/ab-test/create", response_model=schemas.ABTestResponse, status_code=201)
+@app.post("/langfuse/ab-test/create", response_model=schemas.ABTestResponse, status_code=201, tags=["Langfuse Advanced"])
 def create_ab_test(
     request: schemas.ABTestConfig,
     db: Session = Depends(get_db)
@@ -3380,7 +3742,7 @@ def create_ab_test(
         raise HTTPException(status_code=500, detail=f"Failed to create A/B test: {str(e)}")
 
 
-@app.get("/langfuse/ab-test/{test_name}/results", response_model=schemas.ABTestResults)
+@app.get("/langfuse/ab-test/{test_name}/results", response_model=schemas.ABTestResults, tags=["Langfuse Advanced"])
 def get_ab_test_results(
     test_name: str,
     min_observations: int = 100,
@@ -3422,7 +3784,7 @@ def get_ab_test_results(
         raise HTTPException(status_code=500, detail=f"Failed to get A/B test results: {str(e)}")
 
 
-@app.post("/langfuse/dataset/create", response_model=schemas.DatasetResponse, status_code=201)
+@app.post("/langfuse/dataset/create", response_model=schemas.DatasetResponse, status_code=201, tags=["Langfuse Advanced"])
 def create_evaluation_dataset(
     request: schemas.DatasetCreateRequest,
     db: Session = Depends(get_db)
@@ -3464,7 +3826,7 @@ def create_evaluation_dataset(
         raise HTTPException(status_code=500, detail=f"Failed to create dataset: {str(e)}")
 
 
-@app.post("/langfuse/dataset/{dataset_name}/evaluate", response_model=schemas.EvaluationResults)
+@app.post("/langfuse/dataset/{dataset_name}/evaluate", response_model=schemas.EvaluationResults, tags=["Langfuse Advanced"])
 def run_dataset_evaluation(
     dataset_name: str,
     variant_id: str,
@@ -3511,7 +3873,7 @@ def run_dataset_evaluation(
         raise HTTPException(status_code=500, detail=f"Failed to run evaluation: {str(e)}")
 
 
-@app.get("/langfuse/feedback/summary", response_model=schemas.FeedbackSummary)
+@app.get("/langfuse/feedback/summary", response_model=schemas.FeedbackSummary, tags=["Langfuse Advanced"])
 def get_feedback_summary(
     days: int = 7,
     variant_id: Optional[str] = None,
@@ -3554,7 +3916,7 @@ def get_feedback_summary(
         raise HTTPException(status_code=500, detail=f"Failed to get feedback summary: {str(e)}")
 
 
-@app.get("/langfuse/prompts/{prompt_name}/variants", response_model=List[schemas.PromptVariantDetail])
+@app.get("/langfuse/prompts/{prompt_name}/variants", response_model=List[schemas.PromptVariantDetail], tags=["Langfuse Advanced"])
 def get_prompt_variants(
     prompt_name: str,
     db: Session = Depends(get_db)
@@ -3595,4 +3957,333 @@ def get_prompt_variants(
         raise HTTPException(status_code=500, detail=f"Failed to get prompt variants: {str(e)}")
 
 
-        raise HTTPException(status_code=500, detail=f"Failed to add message: {str(e)}")
+# ========== OpenAI-Compatible RAG Endpoint for WebUI Integration ==========
+
+@app.get(
+    "/v1/models",
+    status_code=200,
+    tags=["WebUI Integration"]
+)
+def openai_list_models(db: Session = Depends(get_db)) -> dict:
+    """
+    OpenAI-compatible model listing endpoint for WebUI Connections integration.
+    
+    Returns available RAG models (one per organization) so WebUI can discover
+    them through Settings -> Connections -> OpenAI API.
+    
+    Returns:
+        OpenAI-format model list with rag-{org_id} model IDs
+    """
+    import time as _time
+    try:
+        orgs = crud.get_all_organizations(db, skip=0, limit=100)
+        now = int(_time.time())
+        models_data = []
+        for org in orgs:
+            models_data.append({
+                "id": f"rag-{org.id}",
+                "object": "model",
+                "created": now,
+                "owned_by": "ngo-rag",
+                "name": f"RAG: {org.name}" if hasattr(org, 'name') and org.name else f"RAG Org {org.id}",
+            })
+        return {
+            "object": "list",
+            "data": models_data,
+        }
+    except Exception as e:
+        logger.error(f"Failed to list models: {str(e)}")
+        return {
+            "object": "list",
+            "data": [{
+                "id": "rag-default",
+                "object": "model",
+                "created": int(_time.time()),
+                "owned_by": "ngo-rag",
+                "name": "RAG Default",
+            }],
+        }
+
+
+@app.post(
+    "/v1/chat/completions",
+    status_code=200,
+    tags=["WebUI Integration"]
+)
+def openai_compatible_rag(
+    request: dict = Body(...),
+    db: Session = Depends(get_db)
+) -> dict:
+    """
+    OpenAI-compatible RAG endpoint for WebUI integration (Phase 5E Hybrid).
+    
+    Accepts OpenAI chat completion format and routes to backend RAG system.
+    Supports both OpenAI and Ollama backends based on LLM_BACKEND setting.
+    
+    **Purpose:**
+    - Enable WebUI frontends to use RAG system via standard OpenAI API format
+    - Maintain Langfuse monitoring across both OpenAI and Ollama backends
+    - Provide seamless model switching without WebUI configuration changes
+    
+    **How to Use in Open WebUI:**
+    1. Go to Settings → Connections
+    2. Add Custom OpenAI Endpoint
+    3. Set URL: `http://backend:8000/v1/chat/completions`
+    4. Set API Key: (any value, not validated)
+    5. Model name: `rag-{org_id}` (e.g., "rag-1" for org ID 1)
+    
+    **Request Format (OpenAI-compatible):**
+    ```json
+    {
+        "model": "rag-1",  // Format: "rag-{organization_id}"
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": "What was our Q4 spending?"}
+        ],
+        "temperature": 0.1,  // Optional, default 0.1
+        "max_tokens": 1000   // Optional, default 1000
+    }
+    ```
+    
+    **Response Format (OpenAI-compatible):**
+    ```json
+    {
+        "id": "chatcmpl-abc123",
+        "object": "chat.completion",
+        "created": 1677858242,
+        "model": "rag-1",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Your organization spent €15,000 on consulting..."
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 250,
+            "completion_tokens": 150,
+            "total_tokens": 400
+        }
+    }
+    ```
+    
+    **Model Name Format:**
+    - Must start with "rag-" followed by organization ID
+    - Examples: "rag-1", "rag-42", "rag-100"
+    - Invalid: "gpt-4", "llama3.2", "rag" (missing ID)
+    
+    **Backend Selection:**
+    - Controlled by LLM_BACKEND environment variable
+    - "openai" → gpt-4.1-mini (high quality, small cost)
+    - "ollama" → llama3.2 (free local, faster, lower quality)
+    - Embeddings always use Ollama nomic-embed-text (free)
+    
+    **Langfuse Monitoring:**
+    - All queries traced automatically
+    - Tagged with llm_backend: "openai" or "ollama"
+    - View traces at: https://cloud.langfuse.com
+    - Includes: latency, tokens, cost, quality scores
+    
+    **Error Handling:**
+    - 400: Invalid model format (must be "rag-{id}")
+    - 404: Organization not found
+    - 500: RAG processing failed
+    
+    **Performance:**
+    - OpenAI backend: ~2-3s per query
+    - Ollama backend: ~1-2s per query (faster, runs locally)
+    - Cost: OpenAI ~$0.0001/query, Ollama $0.00 (free)
+    
+    **Example Usage (curl):**
+    ```bash
+    curl -X POST http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "rag-1",
+        "messages": [
+          {"role": "user", "content": "What invoices do I have from Q4?"}
+        ]
+      }'
+    ```
+    """
+    import time
+    import uuid
+    from app.rag_service import RAGService
+    
+    try:
+        # Extract parameters from OpenAI format
+        model = request.get("model", "")
+        messages = request.get("messages", [])
+        temperature = request.get("temperature", 0.1)
+        max_tokens = request.get("max_tokens", 1000)
+        
+        # Validate model format: "rag-{organization_id}"
+        if not model.startswith("rag-"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid model name. Use format 'rag-{organization_id}' (e.g., 'rag-1')"
+            )
+        
+        try:
+            organization_id = int(model.split("-")[1])
+        except (IndexError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid model name. Use format 'rag-{organization_id}' (e.g., 'rag-1')"
+            )
+        
+        # Extract user question from last message
+        if not messages:
+            raise HTTPException(status_code=400, detail="No messages provided")
+        
+        question = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                question = msg.get("content", "")
+                break
+        
+        if not question:
+            raise HTTPException(status_code=400, detail="No user message found")
+        
+        # Validate minimum query length (embedding service requires >= 10 chars)
+        if len(question.strip()) < 10:
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Please provide a more detailed question (at least 10 characters). For example: 'What invoices were received in Q4?' or 'Show me the total spending breakdown.'"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            }
+        
+        logger.info(f"OpenAI-compatible RAG request: org={organization_id}, question='{question[:50]}...'")
+        
+        # Call RAG service (automatically uses configured backend)
+        rag_service = RAGService()
+        rag_response = rag_service.query(
+            question=question,
+            organization_id=organization_id,
+            db=db,
+            top_k=10,
+            temperature=temperature,
+            min_similarity=0.5
+        )
+        
+        # Convert to OpenAI format
+        response = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": rag_response.answer
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(question) // 4,  # Estimate
+                "completion_tokens": len(rag_response.answer) // 4,
+                "total_tokens": (len(question) + len(rag_response.answer)) // 4
+            },
+            "rag_metadata": {
+                "confidence": rag_response.confidence,
+                "chunks_used": rag_response.chunks_used,
+                "sources": [s.dict() for s in rag_response.sources],
+                "query_time_ms": rag_response.query_time_ms
+            }
+        }
+        
+        logger.info(f"OpenAI-compatible RAG response: confidence={rag_response.confidence:.2f}, time={rag_response.query_time_ms}ms")
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OpenAI-compatible RAG failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"RAG processing failed: {str(e)}")
+
+
+@app.get(
+    "/v1/openapi.json",
+    status_code=200,
+    tags=["WebUI Integration"]
+)
+def get_openapi_spec():
+    """
+    Serve OpenAPI specification for WebUI tool server integration.
+    
+    This endpoint provides the OpenAPI 3.1 specification that describes
+    the RAG chat completion endpoint in a format compatible with Open WebUI.
+    
+    **How to use in Open WebUI:**
+    1. Download the spec: `curl http://localhost:8000/v1/openapi.json > rag-spec.json`
+    2. In WebUI: Settings → Tools → Import Tool
+    3. Upload the downloaded JSON file
+    4. The RAG endpoint will be available as a tool
+    
+    Returns:
+        OpenAPI 3.1 specification in JSON format
+    """
+    import json
+    
+    spec_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "openapi-rag-spec.json")
+    
+    try:
+        with open(spec_path, 'r') as f:
+            spec = json.load(f)
+        return spec
+    except FileNotFoundError:
+        # Fallback: return minimal spec if file not found
+        return {
+            "openapi": "3.1.0",
+            "info": {
+                "title": "NGO RAG API",
+                "version": "1.0.0",
+                "description": "Retrieval-Augmented Generation API"
+            },
+            "servers": [
+                {"url": "http://backend:8000/v1"}
+            ],
+            "paths": {
+                "/chat/completions": {
+                    "post": {
+                        "summary": "Query RAG System",
+                        "operationId": "chatCompletions",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["model", "messages"],
+                                        "properties": {
+                                            "model": {"type": "string"},
+                                            "messages": {"type": "array"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {
+                            "200": {"description": "Successful response"}
+                        }
+                    }
+                }
+            }
+        }

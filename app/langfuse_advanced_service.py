@@ -137,7 +137,8 @@ class LangfuseAdvancedService:
         self,
         test_name: str,
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        min_observations: int = 100
     ) -> Dict:
         """
         Get A/B test results from Langfuse.
@@ -148,6 +149,7 @@ class LangfuseAdvancedService:
             test_name: A/B test name
             start_date: Optional start date filter
             end_date: Optional end date filter
+            min_observations: Minimum observations required for significance
             
         Returns:
             {
@@ -182,6 +184,7 @@ class LangfuseAdvancedService:
         # Mock results (in production, query actual Langfuse data)
         return {
             "test_name": test_name,
+            "min_observations": min_observations,
             "variant_a": {
                 "variant_id": test["variant_a"],
                 "sample_size": 150,

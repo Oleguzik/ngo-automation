@@ -23,7 +23,7 @@ This project is a **complete 5-phase backend implementation** for an NGO financi
 - **Phase 5A-5B**: Agentic RAG (Retrieval-Augmented Generation) with vector similarity search
 - **Phase 5C**: Multi-step reasoning for financial analysis (planned)
 
-**Current Status**: Phase 5B Complete ✅ | Production Ready | 50+ Endpoints | 76+ Tests (100% passing)
+**Current Status**: Document Upload Pipeline Validated ✅ | Production Ready | 60+ Documents Processed | 100% Test Success
 
 ---
 
@@ -200,6 +200,20 @@ docker-compose up --build
 curl http://localhost:8000/health
 ```
 
+### Optional: MCP Bridge (Postman JSON-RPC)
+
+This repository includes a minimal MCP bridge to expose key API calls as MCP tools.
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the MCP bridge server
+python scripts/mcp_server.py
+```
+
+MCP endpoint: http://localhost:3333/mcp
+
 ### Local Access
 - **API Documentation**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
@@ -288,21 +302,21 @@ curl -X POST "http://localhost:8000/organizations" \
 POST   /organizations                    Create organization
 GET    /organizations/{id}               Get organization
 GET    /organizations/{id}/transactions  List transactions
-POST   /organizations/{id}/transactions  Create transaction
+POST   /organizations/{organization_id}/transactions  Create transaction
 ```
 
 ### Document Processing (12+ routes)
 ```
-POST   /organizations/{id}/documents/upload        Upload PDF
-GET    /organizations/{id}/documents/{doc_id}      Get document
-POST   /organizations/{id}/documents/{doc_id}/process  Process with AI
+POST   /organizations/{organization_id}/documents/upload        Upload PDF
+GET    /organizations/{organization_id}/documents/{doc_id}      Get document
+POST   /organizations/{organization_id}/documents/{doc_id}/process  Process with AI
 ```
 
 ### Reporting (8+ routes)
 ```
-POST   /organizations/{id}/reports/excel           Generate Excel export
-GET    /organizations/{id}/reports/summary         Financial summary
-POST   /organizations/{id}/reports/consolidate     Multi-source consolidation
+POST   /organizations/{organization_id}/reports/excel           Generate Excel export
+GET    /organizations/{organization_id}/reports/summary         Financial summary
+POST   /organizations/{organization_id}/reports/consolidate     Multi-source consolidation
 ```
 
 ### RAG & Search (10+ routes)

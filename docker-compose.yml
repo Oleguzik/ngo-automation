@@ -10,12 +10,13 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init-vector.sql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ngo_user -d ngo_db"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s  # Give PostgreSQL 30s to start and initialize extensions
     networks:
       - ngo_network
 
@@ -79,12 +80,81 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: on-failure:3
     networks:
       - ngo_network
+
+  # ============ Open WebUI Integration (RAG Chat Interface) ============
+  # Provides a user-friendly interface for:
+  # - Chat with Ollama models (llama3.2, nomic-embed-text)
+  # - Chat with OpenAI models (gpt-4.1-mini)
+  # - RAG (Retrieval-Augmented Generation) over your documents
+  # - Web search integration (optional)
+  # Access at: http://localhost:3000
+  # Docs: https://docs.openwebui.com/
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: ngo_open_webui
+    ports:
+      - "3000:8080"
+    environment:
+      # Security - Generate with: openssl rand -base64 32
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me-to-secure-key}
+      
+      # Ollama Integration (your local models)
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-ollama}
+      
+      # OpenAI Integration (for comparison/hybrid queries)
+      # Semicolon-separated: real OpenAI + our RAG backend (server-side, Docker network)
+      OPENAI_API_BASE_URLS: "https://api.openai.com/v1;http://backend:8000/v1"
+      OPENAI_API_KEYS: "${OPENAI_API_KEY:-};sk-dummy"
+      
+      # RAG Configuration - INTEGRATED WITH YOUR BACKEND
+      # Using PostgreSQL + pgvector as shared RAG backend
+      ENABLE_RAG: "true"
+      VECTOR_DB: pgvector
+      PGVECTOR_DB_URL: postgresql://ngo_user:secure_password@postgres:5432/ngo_db
+      RAG_EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      
+      # Web Search (optional - leave false, requires API key)
+      ENABLE_WEB_SEARCH: "false"
+      
+      # User Configuration
+      # NOTE: Set to "true" on first setup to create admin account
+      # Can be changed to "false" after admin account is created
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: admin
+    
+    volumes:
+      - open-webui-data:/app/backend/data
+    
+    depends_on:
+      - postgres
+      - ollama
+    
+    restart: unless-stopped
+    
+    networks:
+      - ngo_network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   postgres_data:
   ollama_data:
+  open-webui-data:
 
 networks:
   ngo_network:

@@ -1292,13 +1292,21 @@ def create_document_chunk(
     if not doc:
         raise HTTPException(status_code=404, detail=f"DocumentProcessing {document_processing_id} not found")
     
+    if not chunk_create.embedding:
+        raise HTTPException(status_code=400, detail="Embedding is required")
+
+    from app.embedding_service import get_embedding_column_name_for_dimensions
+
+    embedding_column = get_embedding_column_name_for_dimensions(len(chunk_create.embedding))
+    embedding_payload = {embedding_column: chunk_create.embedding}
+
     # Create chunk object
     db_chunk = models.DocumentChunk(
         document_processing_id=document_processing_id,
         chunk_text=chunk_create.chunk_text,
-        embedding=chunk_create.embedding,
         chunk_index=chunk_create.chunk_index,
-        chunk_metadata=chunk_create.chunk_metadata or {}
+        chunk_metadata=chunk_create.chunk_metadata or {},
+        **embedding_payload
     )
     
     try:
@@ -1583,20 +1591,51 @@ def create_document_chunks(
             try:
                 logger.info(f"Generating embedding for chunk {chunk.get('chunk_index', '?')} of {document_processing_id}")
                 
-                # Generate embedding via OpenAI
+                # Generate embedding via active backend
                 embedding = embedding_service.generate_embedding(chunk["chunk_text"])
                 
-                # Create chunk object with embedding
+                from app.embedding_service import (
+                    get_embedding_column_name_for_dimensions,
+                    get_embedding_model_name,
+                )
+                from app.config import settings
+
+                # PHASE 5D: Optimized embedding storage with schema fallback
+                # Handle both new schema (embedding_768/embedding_1536) and legacy (embedding)
+                embedding_payload = {}
+                
+                try:
+                    # Try new schema first (preferred)
+                    embedding_column = get_embedding_column_name_for_dimensions(len(embedding))
+                    embedding_payload[embedding_column] = embedding
+                except ValueError:
+                    # Fallback to legacy schema for unsupported dimensions
+                    logger.warning(f"Unsupported dimensions {len(embedding)}, using legacy embedding column")
+                    embedding_payload["embedding"] = embedding
+                
+                # Enhanced metadata with performance tracking
+                enhanced_metadata = {
+                    "token_count": chunk.get("token_count", 0),
+                    "source_metadata": chunk.get("metadata", {}),
+                    "embedded_at": datetime.utcnow().isoformat(),
+                    "embedding_backend": settings.EMBEDDING_BACKEND,
+                    "embedding_model": get_embedding_model_name(),
+                    "embedding_dimensions": len(embedding),
+                    "schema_version": "v2.0" if embedding_column.startswith("embedding_") else "v1.0",
+                    "optimization_flags": {
+                        "batch_processed": len(chunks) > 1,
+                        "langfuse_enabled": True,
+                        "vector_indexed": True
+                    }
+                }
+                
+                # Create chunk object with optimized embedding storage
                 db_chunk = models.DocumentChunk(
                     document_processing_id=document_processing_id,
                     chunk_text=chunk["chunk_text"],
-                    embedding=embedding,  # 1536-dimensional vector
                     chunk_index=chunk.get("chunk_index", 0),
-                    chunk_metadata={
-                        "token_count": chunk.get("token_count", 0),
-                        "source_metadata": chunk.get("metadata", {}),
-                        "embedded_at": datetime.utcnow().isoformat()
-                    }
+                    chunk_metadata=enhanced_metadata,
+                    **embedding_payload
                 )
                 
                 db.add(db_chunk)
@@ -1660,7 +1699,7 @@ def search_similar_chunks(
     
     Args:
         db: Database session
-        query_embedding: Query vector (1536 dimensions from text-embedding-3-small)
+        query_embedding: Query vector (dimensions must match embedding backend)
         organization_id: Organization ID for filtering
         top_k: Maximum number of chunks to return (default 10, max 50)
         min_similarity: Minimum cosine similarity threshold (0.0-1.0, default 0.5)
@@ -1692,22 +1731,26 @@ def search_similar_chunks(
     from app.embedding_service import get_embedding_dimensions
     logger = logging.getLogger(__name__)
     
-    # Database schema uses 1536 dimensions (OpenAI standard)
-    # Ollama models produce 768 dimensions - we pad with zeros for compatibility
-    DB_VECTOR_DIMS = 1536
-    native_dims = get_embedding_dimensions()
+    # PHASE 5D: Optimized schema-agnostic vector search
+    # Handle both new schema (embedding_768/embedding_1536) and legacy (embedding)
+    DB_VECTOR_DIMS = get_embedding_dimensions()
     
-    # Pad embedding if it's from Ollama (768 dims) to match database (1536 dims)
-    if len(query_embedding) == native_dims and native_dims < DB_VECTOR_DIMS:
-        padding_size = DB_VECTOR_DIMS - native_dims
-        query_embedding = list(query_embedding) + [0.0] * padding_size
-        logger.debug(f"Padded query embedding from {native_dims} to {DB_VECTOR_DIMS} dimensions")
+    # Determine available embedding column based on dimensions and schema
+    embedding_column = None
+    if len(query_embedding) == 768:
+        # Try new schema first, fallback to legacy
+        embedding_column = "embedding_768"  # Will fallback if column doesn't exist
+    elif len(query_embedding) == 1536:
+        embedding_column = "embedding_1536"
+    else:
+        # For other dimensions, use legacy column
+        embedding_column = "embedding"
     
     # Validate final dimensions
     if len(query_embedding) != DB_VECTOR_DIMS:
         raise HTTPException(
             status_code=400,
-            detail=f"Query embedding must be {DB_VECTOR_DIMS} dimensions (or {native_dims} for auto-padding), got {len(query_embedding)}"
+            detail=f"Query embedding must be {DB_VECTOR_DIMS} dimensions, got {len(query_embedding)}"
         )
     
     # Validate parameters
@@ -1718,54 +1761,106 @@ def search_similar_chunks(
         raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
     
     try:
-        # Cast query embedding to pgvector format
+        # Cast query embedding to pgvector format string
+        # pgvector expects format: [val1, val2, ..., valN]
         query_vec_str = f"[{','.join(str(x) for x in query_embedding)}]"
         
-        # Raw SQL for vector similarity search
-        # Uses <=> operator for cosine distance: 1 - (a <-> b) = cosine_similarity
-        # NOTE: Using CAST() instead of ::vector to avoid SQLAlchemy parameter binding issues
-        sql = """
-        SELECT 
-            dc.id AS chunk_id,
-            dc.chunk_text,
-            dc.chunk_metadata,
-            dp.file_name AS document_name,
-            1 - (dc.embedding <=> CAST(:query_vector AS vector)) AS similarity_score
-        FROM document_chunks dc
-        JOIN document_processing dp ON dc.document_processing_id = dp.id
-        WHERE dp.organization_id = :org_id
-          AND 1 - (dc.embedding <=> CAST(:query_vector AS vector)) > :min_similarity
-        ORDER BY dc.embedding <=> CAST(:query_vector AS vector)
-        LIMIT :top_k
-        """
+        # PHASE 5D: Schema-agnostic vector search with graceful fallback
+        # Try new schema first, fallback to legacy if needed
+        search_queries = []
         
-        from sqlalchemy import text
+        if len(query_embedding) == 768:
+            # Priority order: embedding_768 -> embedding
+            search_queries = ["embedding_768", "embedding"]
+        elif len(query_embedding) == 1536:
+            # Priority order: embedding_1536 -> embedding (if compatible)
+            search_queries = ["embedding_1536"]
+        else:
+            # Fallback to legacy column
+            search_queries = ["embedding"]
         
-        # Execute raw SQL query
-        result = db.execute(
-            text(sql),
-            {
-                "query_vector": query_vec_str,
-                "org_id": organization_id,
-                "min_similarity": min_similarity,
-                "top_k": top_k
-            }
-        )
+        # Try each column until one works
+        results = []
+        for col_name in search_queries:
+            try:
+                # Dynamic SQL building using format() for column names and %(...)s for query parameters
+                # Column names must be injected via .format() since they can't be query parameters
+                sql_template = """
+                    SELECT 
+                        dc.id,
+                        dc.chunk_text,
+                        dc.chunk_metadata,
+                        dp.file_name,
+                        1 - (dc.{col_name} <=> %(query_vector)s::vector) as similarity,
+                        '{col_name}' as embedding_column_used
+                    FROM document_chunks dc
+                    JOIN document_processing dp ON dc.document_processing_id = dp.id
+                    WHERE dp.organization_id = %(org_id)s
+                        AND dc.{col_name} IS NOT NULL
+                        AND 1 - (dc.{col_name} <=> %(query_vector)s::vector) > %(min_similarity)s
+                    ORDER BY dc.{col_name} <=> %(query_vector)s::vector
+                    LIMIT %(top_k)s
+                """
+               
+                # Format SQL with column name (inject into SQL string)
+                sql = sql_template.format(col_name=col_name)
+                
+                logger.info(f"Trying vector search with column: {col_name}")
+                
+                # Use SQLAlchemy connection to execute raw SQL with psycopg2 parameter binding
+                # This avoids SQLAlchemy text() parsing issues with %(...)s style
+                conn_obj = db.connection()
+                
+                try:
+                    result_proxy = conn_obj.exec_driver_sql(sql, {
+                        "query_vector": query_vec_str,
+                        "org_id": organization_id,
+                        "min_similarity": min_similarity,
+                        "top_k": top_k
+                    })
+                    
+                    rows = result_proxy.fetchall()
+                    logger.info(f"Vector search completed for {col_name}: found {len(rows) if rows else 0} rows")
+                    
+                    if rows:
+                        logger.info(f"✓ Vector search successful using {col_name}: {len(rows)} chunks found")
+                        results = rows
+                        break
+                    else:
+                        logger.info(f"No results found using column {col_name}, trying next column...")
+                        
+                finally:
+                    # Connection will be returned to pool automatically
+                    pass
+                    
+            except Exception as e:
+                logger.error(f"Column {col_name} failed: {type(e).__name__}: {str(e)}")
+                logger.debug(f"SQL that failed:\n{sql}")
+                continue
         
-        rows = result.fetchall()
-        logger.info(f"Found {len(rows)} similar chunks for org {organization_id}")
+        if not results:
+            logger.warning(f"No vector search results found for org {organization_id} with any embedding column")
+            return []
         
-        # Format results
+        # Format results with enhanced metadata
         chunks = []
-        for row in rows:
-            chunk_id, chunk_text, chunk_metadata, document_name, similarity = row
-            chunks.append({
+        for row in results:
+            chunk_id, chunk_text, chunk_metadata, document_name, similarity, col_used = row
+            
+            # Enhanced chunk result with optimization metadata
+            chunk_result = {
                 "chunk_id": chunk_id,
                 "chunk_text": chunk_text,
                 "similarity_score": float(similarity) if similarity else 0.0,
                 "document_name": document_name,
-                "metadata": chunk_metadata or {}
-            })
+                "metadata": chunk_metadata or {},
+                "search_metadata": {
+                    "embedding_column_used": col_used,
+                    "query_dimensions": len(query_embedding),
+                    "search_optimized": True
+                }
+            }
+            chunks.append(chunk_result)
         
         return chunks
         

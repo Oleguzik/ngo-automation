@@ -30,6 +30,7 @@ import json
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+from app.enhanced_langfuse_monitor import enhanced_monitor, trace_agent
 
 # Langfuse imports
 try:
@@ -252,7 +253,7 @@ class AgenticRouter:
             # Calculate cost based on model
             # gpt-4.1-mini: estimated $0.00020/1K input, $0.00060/1K output
             # gpt-3.5-turbo: $0.0015/1K input, $0.002/1K output
-            # gpt-4o-mini: $0.00015/1K input, $0.0006/1K output
+            # gpt-4.1-mini: $0.00015/1K input, $0.0006/1K output
             if "gpt-3.5-turbo" in self.model:
                 input_cost = response.usage.prompt_tokens * 0.0015 / 1000
                 output_cost = response.usage.completion_tokens * 0.002 / 1000

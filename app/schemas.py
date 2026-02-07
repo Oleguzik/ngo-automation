@@ -760,7 +760,7 @@ class SearchResponse(BaseModel):
 class SourceCitation(BaseModel):
     """Citation source for RAG answer"""
     document_name: str = Field(..., description="Name of source document")
-    chunk_id: UUID = Field(..., description="ID of chunk used")
+    chunk_id: int = Field(..., description="ID of chunk used (auto-increment integer)")
     similarity_score: float = Field(..., ge=0.0, le=1.0, description="Vector similarity score")
     page_number: Optional[int] = Field(None, ge=1, description="Page number if available")
     
@@ -777,19 +777,25 @@ class RAGRequest(BaseModel):
         top_k: Number of chunks to retrieve
         min_similarity: Minimum similarity threshold
         temperature: LLM temperature (0.0-1.0, lower=more factual)
+        enable_langfuse: Enable Langfuse tracing and evaluation
+        conversation_id: Optional conversation context
     
     Example:
         {
             "question": "How much did we spend on consulting in Q4?",
             "top_k": 10,
             "min_similarity": 0.5,
-            "temperature": 0.1
+            "temperature": 0.1,
+            "enable_langfuse": true,
+            "conversation_id": "demo-conversation"
         }
     """
     question: str = Field(..., min_length=1, max_length=1000, description="Natural language question")
     top_k: int = Field(default=10, ge=1, le=50, description="Chunks to retrieve")
     min_similarity: float = Field(default=0.5, ge=0.0, le=1.0, description="Similarity threshold")
     temperature: float = Field(default=0.1, ge=0.0, le=1.0, description="LLM temperature")
+    enable_langfuse: bool = Field(default=False, description="Enable Langfuse tracing and background evaluation")
+    conversation_id: Optional[str] = Field(default=None, description="Optional conversation context")
 
 
 class RAGResponse(BaseModel):
@@ -1772,7 +1778,7 @@ class AgenticRouteResponse(BaseModel):
         description="Response time in milliseconds"
     )
     model: str = Field(
-        description="Model used for routing (e.g., gpt-4o-mini)"
+        description="Model used for routing (e.g., gpt-4.1-mini)"
     )
     prompt_version: str = Field(
         description="Prompt version used (e.g., v2_detailed)"
