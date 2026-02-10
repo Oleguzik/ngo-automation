@@ -200,7 +200,7 @@ class RAGService:
         question: str,
         organization_id: int,
         db: Session,
-        top_k: int = 10,
+        top_k: int = 3,  # Reduced from 10 for faster Ollama performance
         temperature: float = RAG_TEMPERATURE,
         min_similarity: float = 0.5,
         background_tasks: Optional[BackgroundTasks] = None,

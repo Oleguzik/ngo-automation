@@ -10,6 +10,7 @@ PHASE 3: Cost & Profit Analysis with LLM
 """
 
 from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError
+from requests.exceptions import ConnectionError as RequestsConnectionError
 from app.config import settings
 from app import schemas
 from typing import Optional, Dict, Any, List
@@ -74,13 +75,14 @@ class AIService:
                     model=self.model,
                     messages=all_messages,
                     temperature=temperature,
-                    max_tokens=max_tokens
+                    max_tokens=max_tokens,
+                    timeout=60.0  # 60 second timeout for large prompts
                 )
                 
                 content = response.choices[0].message.content
                 return {"content": content}
                 
-            except (APIConnectionError, APITimeoutError) as e:
+            except (APIConnectionError, APITimeoutError, RequestsConnectionError) as e:
                 if attempt < max_retries:
                     logger.warning(
                         f"OpenAI connection error (attempt {attempt}/{max_retries}), "
